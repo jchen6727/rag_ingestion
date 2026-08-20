@@ -1,0 +1,58 @@
+# ingestion/ — direct dependencies only
+# Subset of the root requirements.txt scoped to ingestion/*.py imports.
+# Install with: pip install -r ingestion/requirements.txt
+#
+# Not included here:
+#   google-cloud-aiplatform  — query/generation path only
+#   tqdm, click              — scripts/ only
+#   pytest*                  — testing only
+
+
+# ---------------------------------------------------------------------------
+# Google Cloud (indexer.py, uploader.py, extractor.py, metadata_gen.py)
+# ---------------------------------------------------------------------------
+google-cloud-discoveryengine>=0.11.11
+# indexer.py — DataStore ImportDocuments, delete, list
+
+google-cloud-storage>=2.16.0
+# uploader.py — PDF and chunk JSONL upload
+
+google-cloud-documentai>=2.27.0
+# extractor.py — OCR fallback for scanned PDFs (optional at runtime)
+
+google-genai>=1.0.0
+# metadata_gen.py — Gemini structured metadata extraction
+
+# ---------------------------------------------------------------------------
+# PDF Extraction (extractor.py)
+# ---------------------------------------------------------------------------
+pdfplumber>=0.11.4
+# Primary text/table extraction
+
+pdfminer.six>=20231228
+# pdfplumber transitive dependency; pinned for stability
+
+# ---------------------------------------------------------------------------
+# Chunking / Embeddings (chunker.py)
+# ---------------------------------------------------------------------------
+sentence-transformers>=3.1.1
+# Sentence embeddings for semantic boundary detection
+
+torch>=2.3.0
+# sentence-transformers backend
+# CPU-only install: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+numpy>=1.26.0
+# Cosine similarity over embedding arrays
+
+# ---------------------------------------------------------------------------
+# Models / Config (models.py, config/settings.py, config/chunk_config.yaml)
+# ---------------------------------------------------------------------------
+pydantic>=2.7.0
+# ChunkMetadata — validated before DataStore import
+
+pyyaml>=6.0.1
+# chunk_config.yaml (ChunkerConfig.from_yaml once wired)
+
+python-dotenv>=1.0.1
+# config/settings.py reads .env at startup

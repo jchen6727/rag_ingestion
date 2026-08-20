@@ -1,0 +1,100 @@
+# Chunking configuration for ContextAwareChunker.
+#
+# These parameters are loaded into a ChunkerConfig dataclass at startup.
+# Changing these values after a DataStore has been populated requires
+# purging and re-ingesting the corpus (scripts/purge_datastore.py).
+#
+# See issues.md P1 for a detailed discussion of chunking trade-offs.
+
+# ---------------------------------------------------------------------------
+# Token budget
+# ---------------------------------------------------------------------------
+
+max_tokens: 512
+# Hard ceiling per chunk. Chunks are guaranteed not to exceed this.
+# 512 tokens is a reasonable default for dense clinical text; increase to 768–1024
+# for textbooks with longer argumentative paragraphs.
+
+min_tokens: 64
+# Fragments below this size are merged with their preceding chunk.
+# Prevents tiny orphan chunks from polluting the index (e.g., section headers
+# with no body text).
+
+overlap_tokens: 64
+# Token overlap prepended from the previous chunk's tail.
+# Provides context continuity across chunk boundaries. Set to 0 to disable.
+# Note: overlap increases total index size; at 512-token chunks with 64-token
+# overlap, each chunk is effectively a 448-token step.
+
+# ---------------------------------------------------------------------------
+# Semantic boundary detection
+# ---------------------------------------------------------------------------
+
+semantic_similarity_threshold: 0.75
+# Cosine similarity between adjacent sentence embeddings below which a new
+# chunk boundary is inserted.
+# Lower values produce more splits (finer-grained chunks).
+# Higher values produce fewer splits (larger chunks, better context but
+# lower retrieval precision).
+# Tune by running the chunking evaluation harness — see issues.md P1.
+
+embedding_model: "all-MiniLM-L6-v2"
+# sentence-transformers model for computing sentence embeddings.
+# all-MiniLM-L6-v2: fast, small (~80MB), good general-purpose performance.
+# Alternative for biomedical text: "pritamdeka/S-PubMedBert-MS-MARCO"
+# (higher quality on clinical text, ~420MB).
+
+# ---------------------------------------------------------------------------
+# Structural splitting (header detection)
+# ---------------------------------------------------------------------------
+
+header_patterns:
+  - "^(Chapter|Section|CHAPTER|SECTION)\\s+\\d+"
+  # Matches "Chapter 3", "Section 2.1", etc.
+
+  - "^\\d+\\.\\d*\\s+[A-Z]"
+  # Matches numbered section styles like "3.1 Introduction" or "12. Summary"
+
+  - "^[A-Z][A-Z\\s]{4,40}$"
+  # Matches ALL-CAPS headers (common in older textbooks and clinical guidelines).
+  # Upper bound of 40 chars prevents false positives on long uppercase sentences.
+
+  - "^(Abstract|Introduction|Methods|Results|Discussion|Conclusion|Background|References)\\s*$"
+  # Standard academic paper section headers (exact match, trimmed).
+
+# ---------------------------------------------------------------------------
+# Front-matter detection
+# ---------------------------------------------------------------------------
+
+skip_doc_types:
+  - "front_matter"
+# Chunks classified as front_matter by the metadata generator are excluded
+# from the final index. Inspect filtered chunks via scripts/batch_ingest.py --dry-run
+# before committing a production ingestion run.
+
+front_matter_indicators:
+  # Lines whose presence in a page strongly suggests front-matter content.
+  # The structural splitter uses these to auto-tag sections before Gemini metadata.
+  - "Table of Contents"
+  - "Index"
+  - "Bibliography"
+  - "Acknowledgements"
+  - "Acknowledgments"
+  - "List of Figures"
+  - "List of Tables"
+  - "Preface"
+  - "Foreword"
+
+# ---------------------------------------------------------------------------
+# Performance
+# ---------------------------------------------------------------------------
+
+embedding_batch_size: 64
+# Number of sentences passed to the embedding model in a single forward pass.
+# Larger batches are faster on GPU; reduce to 16–32 if running on CPU to avoid
+# memory pressure with large sections.
+
+max_section_pages: 50
+# If a structural section spans more than this many pages, it is forcibly split
+# at page boundaries before semantic splitting. Prevents the semantic pass from
+# computing embeddings for enormous sections.

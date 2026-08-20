@@ -1,0 +1,75 @@
+# RAG Guidance Pipeline — Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# Python >= 3.12 required. Rollback floor: 3.11 (all packages and language features are compatible).
+
+# ---------------------------------------------------------------------------
+# Google Cloud
+# ---------------------------------------------------------------------------
+google-cloud-discoveryengine>=0.11.11
+# Vertex AI Search (Discovery Engine) — DataStore import, search queries
+
+google-cloud-aiplatform>=1.60.0
+# Vertex AI platform SDK — used if routing Gemini calls through Vertex AI
+# rather than the generativeai package directly
+
+google-genai>=1.0.0
+# Gemini API client — metadata generation, response generation, re-ranking
+
+google-cloud-storage>=2.16.0
+# GCS upload/download for PDFs and chunk JSONL files
+
+google-cloud-documentai>=2.27.0
+# Document AI OCR — optional fallback for scanned PDFs
+
+google-cloud-resource-manager
+# Sanity check for google cloud projects (validate proper config before starting tasks)
+# ---------------------------------------------------------------------------
+# PDF Extraction
+# ---------------------------------------------------------------------------
+pdfplumber>=0.11.4
+# Primary PDF text and table extraction (layout-aware)
+
+pdfminer.six>=20231228
+# pdfplumber dependency; pinned for stability
+
+# ---------------------------------------------------------------------------
+# Chunking / Embeddings
+# ---------------------------------------------------------------------------
+sentence-transformers>=3.1.1
+# Sentence embedding model for semantic boundary detection
+
+torch>=2.3.0
+# sentence-transformers backend; CPU-only install:
+# pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+numpy>=1.26.0
+# Embedding array operations (cosine similarity)
+
+# ---------------------------------------------------------------------------
+# Configuration / Validation
+# ---------------------------------------------------------------------------
+pydantic>=2.7.0
+# ChunkMetadata model and settings validation
+
+pyyaml>=6.0.1
+# Loading prompt_config.yaml and chunk_config.yaml
+
+python-dotenv>=1.0.1
+# Loading .env file into environment variables
+
+# ---------------------------------------------------------------------------
+# CLI / Utilities
+# ---------------------------------------------------------------------------
+tqdm>=4.66.0
+# Progress bars for batch ingestion
+
+click>=8.1.7
+# Optional: can be used to refactor scripts to click-based CLIs
+
+# ---------------------------------------------------------------------------
+# Testing
+# ---------------------------------------------------------------------------
+pytest>=8.2.0
+pytest-mock>=3.14.0
+pytest-cov>=5.0.0

@@ -1,0 +1,521 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ChunkMetadata",
+  "description": "Per-chunk metadata schema for psychotherapy RAG corpus ingestion into Vertex AI Search. Unified schema covering both the real-time analysis (RTA) and after-session analysis (ASA) pipelines. corpus_scope is the hard routing field separating the two retrieval paths.",
+  "type": "object",
+  "required": ["doc_id", "source_file", "domain", "doc_type", "page_start", "page_end", "chunk_index"],
+  "properties": {
+
+    "doc_id": {
+      "type": "string",
+      "description": "SHA-256 hex digest of the source PDF bytes (64 chars). Used as stable DataStore document ID — must be consistent across re-ingestion.",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "source_file": {
+      "type": "string",
+      "description": "Original PDF filename (basename only, no path)."
+    },
+    "title": {
+      "type": "string",
+      "description": "Inferred document or chapter title. Empty string if not determinable.",
+      "default": ""
+    },
+    "chapter": {
+      "type": "string",
+      "description": "Nearest detected chapter or session heading above this chunk (e.g. 'Session 4: In Vivo Exposure'). Treatment manuals use session numbers as primary navigation units.",
+      "default": ""
+    },
+    "page_start": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "First page of this chunk (1-indexed)."
+    },
+    "page_end": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Last page of this chunk (1-indexed). Equal to page_start for single-page chunks."
+    },
+    "chunk_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Sequential zero-based index of this chunk within its parent document."
+    },
+    "year_published": {
+      "type": ["integer", "null"],
+      "minimum": 1900,
+      "maximum": 2100,
+      "description": "Publication year extracted from title page or copyright notice. Null if not found. Psychotherapy evidence evolves; edition year affects relevance.",
+      "default": null
+    },
+
+    "domain": {
+      "type": "string",
+      "description": "Document-level primary orientation of the source text. Assigned once per document from the source's overall focus. Distinct from therapeutic_modality, which is chunk-level. PromptBuilder uses this field to select the persona — mismatches silently fall back to psychotherapy_general.",
+      "enum": [
+        "cognitive_behavioral",
+        "dialectical_behavior",
+        "trauma_focused",
+        "interpersonal",
+        "motivational_interviewing",
+        "mindfulness_based",
+        "crisis_intervention",
+        "therapeutic_alliance",
+        "clinical_supervision",
+        "psychopathology_clinical",
+        "psychotherapy_general",
+        "other"
+      ]
+    },
+    "subdomain": {
+      "type": "string",
+      "description": "Narrower topic within the domain (e.g. 'schema therapy', 'CPT stuck point work', 'adolescent DBT'). Free text; not filterable by default.",
+      "default": ""
+    },
+
+    "doc_type": {
+      "type": "string",
+      "description": "Document classification. front_matter chunks are excluded from search. homework_worksheet and psychoeducation_material chunks require target_audience=patient and corpus_scope=asa_only.",
+      "enum": [
+        "treatment_manual",
+        "session_transcript",
+        "case_formulation",
+        "supervision_material",
+        "clinical_worksheet",
+        "textbook",
+        "clinical_guideline",
+        "review_article",
+        "case_report",
+        "rct_paper",
+        "meta_analysis",
+        "outcome_instrument",
+        "homework_worksheet",
+        "psychoeducation_material",
+        "progress_note_template",
+        "front_matter"
+      ]
+    },
+
+    "therapeutic_modality": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "CBT", "CBT-I", "BA", "REBT", "Schema",
+          "DBT",
+          "CPT", "PE",
+          "IPT", "IPSRT",
+          "MI",
+          "MBCT",
+          "UP",
+          "supportive", "integrative"
+        ]
+      },
+      "description": "Chunk-level: the therapy modality or modalities this passage directly addresses. Primary filter for modality-specific RTA queries. Array because some texts (e.g. Unified Protocol) cut across modalities. Scoped to modalities within competence of CBT/DBT/IPT-trained clinicians. UP=Unified Protocol (Barlow's transdiagnostic CBT). MBCT=Mindfulness-Based Cognitive Therapy (CBT derivative). CPT and PE are CBT-based trauma protocols requiring additional training but within CBT scope.",
+      "default": []
+    },
+
+    "clinical_presentation": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "depression", "bipolar", "anxiety_general", "panic_disorder",
+          "social_anxiety", "specific_phobia", "GAD",
+          "PTSD", "complex_trauma",
+          "OCD", "hoarding", "bfrb",
+          "BPD", "ADHD",
+          "SUD", "eating_disorder",
+          "grief_bereavement", "chronic_pain", "somatic", "health_anxiety",
+          "psychosis",
+          "narcissistic", "antisocial", "avoidant", "dependent",
+          "dissociative_disorders",
+          "relationship_family", "medical_stress", "impulse_control", "insomnia",
+          "autism_spectrum", "perinatal",
+          "other"
+        ]
+      },
+      "description": "Clinical presentations or diagnostic themes this chunk addresses. bfrb=body-focused repetitive behaviors (trichotillomania, excoriation). dissociative_disorders is distinct from complex_trauma; has its own mid-session presentation (part switching).",
+      "default": []
+    },
+
+    "session_event_tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "rupture_withdrawal",
+          "rupture_confrontation",
+          "rupture_repair",
+          "transference_enactment",
+          "countertransference",
+          "doorknob_disclosure",
+          "historical_disclosure",
+          "crisis_escalation",
+          "decompensation",
+          "flight_into_health",
+          "resistance_avoidance",
+          "intellectualization",
+          "boundary_testing",
+          "alliance_building",
+          "psychoeducation",
+          "exposure_in_session",
+          "homework_review",
+          "termination_process",
+          "shame_activation",
+          "somatic_activation",
+          "therapist_self_disclosure",
+          "avoidance_safety_behavior",
+          "minority_stress_disclosure",
+          "cultural_mismatch",
+          "premature_termination_signal",
+          "grief_loss_activation",
+          "none"
+        ]
+      },
+      "description": "In-session event types this chunk directly addresses. Primary real-time retrieval trigger for the RTA pipeline. shame_activation: acute shame response (CBT and DBT have specific protocols; DBT uses opposite action, CBT uses cognitive restructuring and behavioral experiments). somatic_activation: body-based distress requiring grounding or regulation intervention (relevant to DBT distress tolerance, PE within-session affect management). avoidance_safety_behavior: within-session safety behaviors (ERP/PE-specific, distinct from resistance_avoidance). minority_stress_disclosure: discrimination/microaggression disclosure requiring affirmative response. cultural_mismatch: cultural misattunement requiring in-session correction. premature_termination_signal: dropout intention disclosed mid-treatment. grief_loss_activation: acute grief emerging mid-session (distinct from grief_bereavement as clinical_presentation; IPT has specific protocols for grief as a problem area).",
+      "default": ["none"]
+    },
+
+    "session_phase": {
+      "type": "string",
+      "enum": [
+        "pre_intake_consultation",
+        "assessment_intake",
+        "early_treatment",
+        "mid_treatment",
+        "late_treatment",
+        "termination",
+        "crisis",
+        "any"
+      ],
+      "description": "Where in the arc of treatment this chunk applies. pre_intake_consultation covers expectancy-setting and engagement work before formal treatment begins. crisis is phase-agnostic.",
+      "default": "any"
+    },
+
+    "target_audience": {
+      "type": "string",
+      "enum": ["therapist", "trainee", "supervisor", "patient", "general"],
+      "description": "Intended audience of the source document. target_audience=patient is a hard exclusion from all RTA queries and all ASA queries unless analysis_function=homework_resource. Never surface patient-facing content outside the homework assignment workflow.",
+      "default": "therapist"
+    },
+
+    "practice_recommendation_level": {
+      "type": ["string", "null"],
+      "enum": [
+        "strongly_recommended",
+        "recommended",
+        "expert_consensus",
+        "theoretical_rationale",
+        "empirically_derived",
+        "illustrative",
+        "use_with_caution",
+        "contraindicated",
+        "not_applicable",
+        null
+      ],
+      "description": "Strength and polarity of the practice recommendation. Replaces GRADE evidence_level for psychotherapy context. strongly_recommended=APA/NICE Grade A, RCT-supported. empirically_derived=RCT-sourced findings not yet synthesized into a formal guideline (primary ASA use). use_with_caution=technique has evidence but requires specific preconditions. contraindicated=explicitly advised against in this context by the source. Polarity values (use_with_caution, contraindicated) must be surfaced prominently by the retrieval system alongside any positive recommendations.",
+      "default": null
+    },
+
+    "technique_tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Named clinical techniques referenced in the chunk (e.g. 'chain analysis', 'imaginal exposure', 'TIPP skills', 'Socratic questioning', 'cognitive restructuring', 'behavioral activation', 'interpersonal incident review'). Gemini-extracted proper technique names — distinct from keywords (topic terms). 0–10 items.",
+      "default": []
+    },
+
+    "keywords": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Key topic terms extracted by Gemini. 3–10 terms.",
+      "default": []
+    },
+
+    "clinical_caution": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Explicit contraindications or precautions stated in the chunk (e.g. 'contraindicated without prior stabilization work', 'requires dissociation assessment before proceeding', 'not appropriate in first three sessions'). The RTA system must surface caution flags alongside technique recommendations — not suppress them. Patient safety field: a technique recommended without its documented contraindication is dangerous. 0–5 items.",
+      "default": []
+    },
+
+    "training_level_required": {
+      "type": ["string", "null"],
+      "enum": ["generalist", "supervised_trainee", "post_licensure", "specialist_trained", null],
+      "description": "Minimum clinician training level for the technique(s) described in this chunk. specialist_trained requires protocol-specific certification or supervised practicum (e.g. PE/CPT require formal training beyond basic CBT). Used to gate retrieval for supervised trainees.",
+      "default": null
+    },
+
+    "risk_dimension_tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "suicide_ideation_chronic",
+          "self_harm_nonsuicidal",
+          "homicide_risk",
+          "substance_relapse_monitoring",
+          "psychotic_decompensation",
+          "eating_disorder_medical_risk"
+        ]
+      },
+      "description": "Ongoing risk monitoring dimensions this chunk addresses — distinct from crisis_escalation in session_event_tags, which is acute. The RTA system should run a passive background retrieval pass on every session using this field, not only when crisis_escalation fires. self_harm_nonsuicidal=NSSI pattern monitoring between episodes.",
+      "default": []
+    },
+
+    "corpus_scope": {
+      "type": "string",
+      "enum": ["rta_and_asa", "asa_only"],
+      "description": "Hard retrieval routing field. asa_only chunks are excluded from the real-time pipeline — the RTA searcher applies corpus_scope != 'asa_only' as a mandatory pre-filter on every query. This is a correctness requirement, not a ranking signal. homework_worksheet, outcome_instrument, rct_paper, and meta_analysis doc_types default to asa_only.",
+      "default": "rta_and_asa"
+    },
+
+    "analysis_function": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "session_autopsy",
+          "case_formulation_update",
+          "treatment_plan_revision",
+          "homework_resource",
+          "outcome_monitoring",
+          "risk_documentation",
+          "referral_coordination",
+          "prognosis_trajectory",
+          "supervision_preparation",
+          "termination_planning"
+        ]
+      },
+      "description": "Post-session analysis function(s) this chunk serves. Primary ASA retrieval routing field. session_autopsy=retrospective event identification and response evaluation. case_formulation_update=integrating session data into evolving case conceptualization. treatment_plan_revision=adjusting modality, pacing, goals, or sequence. homework_resource=between-session assignment retrieval (requires secondary filter: target_audience=patient). outcome_monitoring=interpreting outcome scores. risk_documentation=post-session safety plan review, duty-to-warn reasoning, level-of-care. referral_coordination=adjunctive service and prescriber communication. prognosis_trajectory=expected course-of-illness, relapse risk, maintenance planning. supervision_preparation=framing session for supervisor review. termination_planning=reviewing treatment progress, managing ending-phase affect, producing termination summary.",
+      "default": []
+    },
+
+    "evidence_base": {
+      "type": "string",
+      "enum": [
+        "rct_primary",
+        "rct_moderator",
+        "meta_analytic",
+        "qualitative_research",
+        "case_series",
+        "single_case",
+        "expert_clinical",
+        "theoretical",
+        "instrument_normative",
+        "not_applicable"
+      ],
+      "description": "Epistemological type of the evidence in the chunk. Distinct from practice_recommendation_level (strength of recommendation) — this field rates the epistemic type of the source. rct_moderator=chunk reporting moderator/mediator analysis. Used jointly with patient_population for treatment-matching queries in ASA.",
+      "default": "not_applicable"
+    },
+
+    "patient_population": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "adult_general",
+          "adult_older",
+          "adolescent",
+          "child",
+          "veteran_military",
+          "first_responder",
+          "perinatal",
+          "lgbtq",
+          "bipoc",
+          "low_income",
+          "chronic_medical_illness",
+          "severe_mental_illness",
+          "forensic",
+          "cross_cultural",
+          "not_specified"
+        ]
+      },
+      "description": "Population for whom this chunk's evidence or recommendation applies. Critical for treatment matching — prevents an adult veteran PTSD RCT from being weighted equally with a civilian adolescent sample. bipoc is a broad designation; specify population in subdomain. Used as a ranking moderator when filtering evidence_base IN [rct_primary, rct_moderator, meta_analytic].",
+      "default": ["not_specified"]
+    },
+
+    "time_horizon": {
+      "type": "string",
+      "enum": [
+        "single_session",
+        "near_term",
+        "short_term",
+        "treatment_course",
+        "post_termination",
+        "open_ended",
+        "any"
+      ],
+      "description": "Temporal scope of the chunk's clinical relevance. near_term=next 1-4 sessions. short_term=1-3 months. treatment_course=full time-limited treatment arc (typical for CBT, DBT, IPT protocols). open_ended=no defined termination target (applies to long-term supportive or maintenance-phase work). Used for routing longitudinal management queries in the ASA pipeline.",
+      "default": "any"
+    },
+
+    "outcome_measure_tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "PHQ-9", "GAD-7", "PCL-5", "BDI-II", "DASS-21",
+          "HAM-D", "MADRS", "BAI", "SPIN",
+          "ORS", "SRS", "PCOMS", "OQ-45", "CORE-OM",
+          "C-SSRS", "Columbia",
+          "AUDIT", "DAST",
+          "MDQ", "HCL-32",
+          "WHODAS", "SF-36", "WHOQOL",
+          "IES-R", "DES", "EDE-Q",
+          "other"
+        ]
+      },
+      "description": "Outcome instruments referenced, normed, or interpreted in the chunk. Use exact canonical abbreviation (normalize PHQ9 / PHQ 9 / Patient Health Questionnaire-9 to PHQ-9 in _fallback_extraction). Enables routing to specific instrument guidance in analysis_function=outcome_monitoring queries.",
+      "default": []
+    },
+
+    "population_focus": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "adult_general",
+          "adult_older",
+          "adolescent",
+          "child",
+          "veteran_military",
+          "first_responder",
+          "perinatal",
+          "lgbtq",
+          "bipoc",
+          "low_income",
+          "chronic_medical_illness",
+          "severe_mental_illness",
+          "forensic",
+          "cross_cultural",
+          "not_reported"
+        ]
+      },
+      "description": "Who the source was developed, adapted, piloted, or intended for. Describes the source's development or validation population — distinct from patient_population, which describes for whom the chunk's evidence or recommendation applies. Used to surface representation gaps: a technique developed exclusively with adult_general samples should be flagged when retrieved for lgbtq or adolescent queries.",
+      "default": ["not_reported"]
+    },
+
+    "source_language": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Language(s) of the source document and any reported translation or cultural adaptation. Use full English language names (e.g. 'English', 'Spanish', 'Mandarin'). A translated document lists both the original and target language. Default assumes English unless stated otherwise in the document.",
+      "default": ["English"]
+    },
+
+    "setting": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "community",
+          "academic_medical_center",
+          "safety_net",
+          "outpatient_clinic",
+          "inpatient",
+          "school_based",
+          "primary_care",
+          "telehealth",
+          "urban",
+          "rural",
+          "suburban",
+          "not_reported"
+        ]
+      },
+      "description": "Setting(s) in which the source was developed or tested. Used to assess ecological validity for treatment-matching queries: a technique validated in an academic medical center may not generalize to a community safety-net clinic. Multiple values are allowed.",
+      "default": ["not_reported"]
+    },
+
+    "adaptation_status": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "culturally_adapted",
+        "resource_constrained",
+        "translated",
+        "not_reported"
+      ],
+      "description": "Whether the source represents a standard protocol, a culturally adapted version, a resource-constrained adaptation (reduced sessions, simplified materials, lay-provider delivery), or a translated document. culturally_adapted and resource_constrained sources may warrant corpus_scope=rta_and_asa even when the base protocol defaults to asa_only. translated sources should also populate source_language with both origin and target languages.",
+      "default": "standard"
+    },
+
+    "missingness": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "What the source does not report, so representation gaps remain visible at retrieval time. Examples: 'no demographic data on study sample', 'no fidelity monitoring reported', 'efficacy data for adolescents excluded', 'adverse event reporting absent'. The retrieval system must surface missingness notes alongside retrieved content when non-empty. Gemini extraction must be explicitly prompted to infer absence, not only extract presence. 0–5 items.",
+      "default": []
+    },
+
+    "presentation_coverage": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "somatic_expression",
+          "spiritual_religious",
+          "migration_acculturation",
+          "discrimination_stress",
+          "family_relational_framing",
+          "general_cultural",
+          "none_reported"
+        ]
+      },
+      "description": "Whether the source addresses somatic expression of distress, spiritual or religious framing, migration or acculturation stress, discrimination-related stress, family or relational framing of problems, or general cultural considerations. Source-level property describing what the document covers — distinct from session_event_tags, which is chunk-level and describes in-session events a passage addresses. Supports routing of culturally specific queries to appropriate sources.",
+      "default": ["none_reported"]
+    },
+
+    "study_type": {
+      "type": ["string", "null"],
+      "enum": [
+        "randomized_controlled_trial",
+        "quasi_experimental",
+        "open_trial",
+        "meta_analysis",
+        "systematic_review",
+        "qualitative_study",
+        "case_series",
+        "single_case_experimental",
+        "case_report",
+        "normative_development",
+        "theoretical_position_paper",
+        "clinical_manual",
+        "guideline_document",
+        null
+      ],
+      "description": "Overall study design of the source document, set once per document from the source's primary design. Distinct from evidence_base, which is chunk-level and describes the epistemological type of content in a specific passage. clinical_manual and guideline_document apply where a formal study design is not applicable.",
+      "default": null
+    },
+
+    "sample_size": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Total study sample size, where applicable. Null if not reported or not applicable (clinical manuals, theoretical texts, guidelines). For meta-analyses, record the total pooled N across included studies. Used jointly with study_type and patient_population to assess evidence weight in treatment-matching queries.",
+      "default": null
+    },
+
+    "intended_use_context": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "in_session_support",
+          "assessment",
+          "education",
+          "supervision",
+          "self_study"
+        ]
+      },
+      "description": "High-level intended use context of the source: in_session_support (quick reference during or immediately before sessions), assessment (scoring, interpretation, or administration guidance), education (psychoeducation or training material), supervision (case consultation or trainee development), self_study (extended reading not appropriate for real-time retrieval). Distinct from doc_type (what the document is) and target_audience (who it is written for). Used to route ASA queries to sources matched to the query's functional context.",
+      "default": []
+    }
+
+  },
+  "additionalProperties": false,
+  "notes": {
+    "vertex_ai_search": "String and integer scalar fields are registered as filterable attributes in the DataStore schema. Array fields (therapeutic_modality, clinical_presentation, session_event_tags, analysis_function, patient_population, risk_dimension_tags, outcome_measure_tags, clinical_caution, technique_tags, population_focus, setting, presentation_coverage, intended_use_context, source_language) must be explicitly registered as filterable attributes (type 'key' or 'text') in setup_vertex_search.py for retrieval filter use. missingness is informational only and does not require filterable registration. Schema changes require purge_datastore.py --confirm followed by full re-ingestion. See config/ISSUES.md for DataStore registration checklist.",
+    "domain_vs_modality": "domain is a document-level property assigned from the source's primary orientation (set once per document). therapeutic_modality is a chunk-level property extracted from passage content and may differ from the document's domain. This distinction must appear in the Gemini extraction prompt to prevent inconsistent tagging.",
+    "routing_safety": "corpus_scope=asa_only is a correctness constraint on the RTA searcher, not a soft signal. target_audience=patient is a hard exclusion from all retrieval paths except analysis_function=homework_resource. Both filters must be implemented as pre-filters in the searcher, not as ranking adjustments.",
+    "representation_and_implementation_fields": "population_focus, source_language, setting, adaptation_status, missingness, and presentation_coverage describe source-level provenance and representation gaps. study_type, sample_size, and intended_use_context describe source-level methodological and functional context. All nine fields are document-level properties set once per document, distinct from chunk-level fields (evidence_base, patient_population) which describe individual passage content. See config/ISSUES.md I-16 through I-22 for extraction and routing guidance.",
+    "recommended_change_items": "Fields added from RECOMMENDED CHANGE blocks in corpus notes (included in this schema): UP in therapeutic_modality; dissociative_disorders/health_anxiety/hoarding/bfrb/autism_spectrum/perinatal in clinical_presentation; shame_activation/somatic_activation/therapist_self_disclosure/avoidance_safety_behavior/minority_stress_disclosure/cultural_mismatch/premature_termination_signal/grief_loss_activation in session_event_tags; pre_intake_consultation in session_phase; use_with_caution/contraindicated/empirically_derived in practice_recommendation_level; clinical_caution/training_level_required/risk_dimension_tags fields; termination_planning in analysis_function; open_ended in time_horizon. SE and SP from the original RECOMMENDED CHANGE blocks were removed in the CBT/DBT/IPT scope pruning pass. Representation and implementation fields added from proposed_changes_metadata_schema.md (2026-06-25): population_focus, source_language, setting, adaptation_status, missingness, presentation_coverage, study_type, sample_size, intended_use_context. Review config/ISSUES.md for items requiring corpus acquisition decisions.",
+    "removed_fields": "Removed from prior schema: entities (superseded by technique_tags), evidence_level GRADE A/B/C/D (superseded by practice_recommendation_level). Update ingestion/metadata_gen.py _fallback_extraction() to not populate these fields."
+  }
+}

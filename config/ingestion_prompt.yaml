@@ -1,0 +1,35 @@
+# Human-authored ingestion prompt scaffolding for ingestion/metadata_gen.py.
+#
+# WHY THIS FILE EXISTS
+# The Gemini extraction prompt has two parts (schema_recommendations.md §3.1):
+#   1. the controlled VOCABULARY (enum lists) — GENERATED from config/rta_v1.json
+#      at runtime (`_enum_legend`); never hand-edit it, or it drifts from the schema.
+#   2. the natural-language FRAMING and GUIDANCE — clinical judgement, edited by hand.
+# This file holds part 2 only, so a non-developer can tune the wording without
+# touching Python. If this file is missing/invalid, metadata_gen falls back to the
+# built-in defaults (identical text), so ingestion never breaks on a bad edit.
+#
+# Placeholders available: none — keep tokens/enum names OUT of here (they come from
+# the schema). Schema `notes` (domain_vs_modality, directionality_applies_when) are
+# appended automatically after `guidance`.
+
+# One-line role statement at the top of the prompt.
+system_preamble: >-
+  You are extracting structured metadata for a psychotherapy guidance RAG corpus
+  (CBT/DBT/IPT clinicians; real-time RTA retrieval pipeline).
+
+# Instruction that precedes the JSON schema block.
+output_instruction: "Respond ONLY with valid JSON matching this schema (no markdown, no prose):"
+
+# Header printed just before the generated enum legend.
+allowed_values_header: "Allowed values for controlled fields (use these EXACT tokens):"
+
+# Clinical extraction guidance, one bullet per list item. Edit freely.
+guidance:
+  - "- domain is document-level (the source's overall orientation); therapeutic_modality is chunk-level (what THIS passage addresses) — they may differ."
+  - "- directionality and applies_when are ONE decision: does the passage say to DO something (indicated), AVOID something (contraindicated), or proceed with CAUTION (cautionary), and under exactly which events/presentations/patient-states does that apply? If it applies whenever the modality is active, return applies_when as an empty list. A contraindicated or cautionary passage MUST list at least one applies_when value."
+  - "- clinical_caution and any contraindicated/cautionary directionality are patient-safety fields: extract them explicitly and never omit a stated contraindication."
+  - "- session_event_tags here tag what the passage is ABOUT (a retrieval target), NOT a live event; 'none' means the passage addresses no specific in-session event."
+
+# Final instruction after the chunk text.
+closing_instruction: "Output valid JSON only."

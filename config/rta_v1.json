@@ -1,0 +1,311 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ChunkMetadata_v1",
+  "description": "Per-chunk metadata schema for the real-time analysis (RTA) psychotherapy guidance pipeline (CBT/DBT/IPT-trained clinicians). ACTIVE ingestion schema as of 2026-07-20. The 37-field unified RTA+ASA schema in metadata_schema.json is retained for future after-session-analysis (ASA) work and as a historical record; it is NOT loaded by the RTA ingest path.",
+  "type": "object",
+  "required": ["doc_id", "source_file", "domain", "doc_type", "page_start", "page_end", "chunk_index"],
+
+  "$defs": {
+    "state_vocab": {
+      "type": "string",
+      "description": "Patient states that gate what the system may recommend, independent of diagnosis and of what just happened in session. PROVISIONAL — pending clinician confirmation (schema_recommendations.md §9 Q2). The mechanism is implemented now; the value list is versioned when clinicians respond.",
+      "enum": [
+        "acute_suicidality",
+        "intoxication",
+        "insufficient_stabilization",
+        "active_dissociation",
+        "acute_psychosis",
+        "medical_instability",
+        "cognitive_impairment",
+        "active_self_harm"
+      ]
+    }
+  },
+
+  "properties": {
+    "doc_id": {
+      "type": "string",
+      "description": "SHA-256 hex digest of the source PDF bytes (64 chars). Used as stable DataStore document ID — must be consistent across re-ingestion.",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "source_file": {
+      "type": "string",
+      "description": "Original PDF filename (basename only, no path)."
+    },
+    "title": {
+      "type": "string",
+      "description": "Inferred document or chapter title. Empty string if not determinable.",
+      "default": ""
+    },
+    "chapter": {
+      "type": "string",
+      "description": "Nearest detected chapter or session heading above this chunk (e.g. 'Session 4: In Vivo Exposure'). Treatment manuals use session numbers as primary navigation units.",
+      "default": ""
+    },
+    "page_start": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "First page of this chunk (1-indexed)."
+    },
+    "page_end": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Last page of this chunk (1-indexed). Equal to page_start for single-page chunks."
+    },
+    "chunk_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Sequential zero-based index of this chunk within its parent document."
+    },
+    "year_published": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Publication year extracted from title page or copyright notice. 0 if not found. More recent year should be prioritized for up-to-date literature.",
+      "default": 0
+    },
+
+
+    "domain": {
+      "type": "string",
+      "description": "Document-level primary orientation of the source text. Assigned once per document from the source's overall focus. Distinct from therapeutic_modality, which is chunk-level. Should correspond to a broader 'persona' -> i.e. a CBT practitioner, a DBT practitioner, an IPT practitioner that serves as umbrella when distinct modality documents insufficient. Documents that fall under broadly applicable practices (e.g. motivational_interviewing, crisis_intervention, therapeutic_alliance,+), fall into psychotherapy_general.",
+      "enum": [
+        "cognitive_behavioral_therapy",
+        "dialectical_behavior_therapy",
+        "interpersonal_therapy",
+        "behavioral_activation_therapy",
+        "acceptance_commitment_therapy",
+        "psychotherapy_general"
+      ],
+      "default": "psychotherapy_general"
+    },
+    "subdomain": {
+      "type": "string",
+      "description": "Subdomain descriptor -- Narrower topic within the domain (e.g. 'CPT stuck point work', 'adolescent DBT', +). Free text for visual reference; not filterable by default.",
+      "default": ""
+    },
+
+    "doc_type": {
+      "type": "string",
+      "description": "Document classification. including treatment_manual (for diagnosis/intervention focused material), textbook (for therapy modality material), and clinical_guideline (for standard clinical algorithms, psychometric materials), and other for other texts",
+      "enum": [
+        "treatment_manual",
+        "textbook",
+        "clinical_guideline",
+        "other"
+      ]
+    },
+
+    "therapeutic_modality": {
+      "type": "array",
+      "description": "Chunk-level, loaded at start: the therapy modality or modalities this passage directly addresses. Primary filter for modality-specific RTA queries. For texts addressing multiple modalities, each appropriate tag is applied. Scoped to modalities within competence of CBT/DBT/IPT-trained clinicians. CBT: Cognitive Behavioral Therapy (General and Depression), CPT: Cognitive Processing Therapy (PTSD), BA: Behavioral Activation (General and Depression), PE: Prolonged Exposure (PTSD), ERP: Exposure and Response Prevention (OCD), DBT: Dialectical Behavioral Therapy, ACT: Acceptance and Commitment Therapy, MBCT: Mindfulness-Based Cognitive Therapy, UP: Unified protocol, Schema: Schema Therapy. DBT: Dialectical Behavior Therapy, IPT: InterPersonal Therapy. MI: Motivational Interviewing. MI is designed to be retrieved across other modalities, others may or may not be segregated (e.g. CBT AND NOT DBT).",
+      "items": {
+        "type": "string",
+        "enum": [
+          "CBT", "CPT", "BA",
+          "PE", "ERP", "ACT",
+          "MBCT", "UP", "Schema",
+          "DBT", "IPT", "MI"
+        ]
+      },
+      "default": []
+    },
+
+    "clinical_presentation": {
+      "type": "array",
+      "description": "Clinical presentations or diagnostic themes this chunk addresses. OCD: obsessions and compulsions. SUD: substance use disorder.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "depression", "anxiety_general", "anxiety_social","panic_attacks", "OCD", "trauma", "interpersonal", "SUD","suicidality", "insomnia", "grief",
+          "other"
+        ]
+      },
+      "default": []
+    },
+
+    "session_event_tags": {
+      "type": "array",
+      "description": "In-session event types this chunk directly addresses. Primary real-time retrieval trigger for the RTA pipeline. INGESTION semantics ONLY: tag what a passage is ABOUT (a retrieval target). The live event detector uses the SAME enum with the OPPOSITE meaning (what IS HAPPENING now) — never share a prompt between the two. 'none' is ingestion bookkeeping and is never a retrieval target. motivational_ambivalence covers Motivational-Interviewing triggers (sustain talk, change-talk elicitation) surfaced mid-session.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "rupture",
+          "crisis_escalation",
+          "disclosure_SI",
+          "disclosure_HI",
+          "disclosure_abuse",
+          "dissociation",
+          "avoidance_in_session",
+          "nonadherence",
+          "motivational_ambivalence",
+          "none"
+        ]
+      },
+      "default": ["none"]
+    },
+
+    "session_phase": {
+      "type": "string",
+      "description": "Where in the arc of treatment this chunk applies. crisis is phase-agnostic and must be applied as a SOFT filter that fired events relax — never a hard pre-filter (a hard phase filter would suppress crisis content in a late-treatment session). Concentrated value is in manualized, session-numbered protocols (PE, CPT, ERP, DBT, UP).",
+      "enum": [
+        "early_treatment",
+        "mid_treatment",
+        "late_treatment",
+        "termination",
+        "crisis",
+        "any"
+      ],
+      "default": "any"
+    },
+
+    "directionality": {
+      "type": "string",
+      "enum": ["indicated", "contraindicated", "cautionary", "neutral"],
+      "description": "Does this chunk describe doing something (indicated), avoiding something (contraindicated), or a caution (cautionary)? neutral = no directional stance. Chunk-intrinsic — does NOT encode for-whom; that is carried by applies_when. Co-required with applies_when: a contraindicated or cautionary chunk MUST have a non-empty applies_when (enforced by the schema if/then and by the ingestion validation gate).",
+      "default": "neutral"
+    },
+
+    "applies_when": {
+      "type": "array",
+      "description": "The states/events/contexts under which this chunk's directionality is active. Drawn from the SAME controlled vocabulary as session_event_tags + clinical_presentation + the state_vocab ($defs.state_vocab). Multiple values are OR (broader net, favoring safety recall). Empty = applies whenever the modality is active. Must be non-empty when directionality is contraindicated or cautionary.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "rupture",
+          "crisis_escalation",
+          "disclosure_SI",
+          "disclosure_HI",
+          "disclosure_abuse",
+          "dissociation",
+          "avoidance_in_session",
+          "nonadherence",
+          "motivational_ambivalence",
+          "depression",
+          "anxiety_general",
+          "anxiety_social",
+          "panic_attacks",
+          "OCD",
+          "trauma",
+          "interpersonal",
+          "SUD",
+          "suicidality",
+          "insomnia",
+          "grief",
+          "acute_suicidality",
+          "intoxication",
+          "insufficient_stabilization",
+          "active_dissociation",
+          "acute_psychosis",
+          "medical_instability",
+          "cognitive_impairment",
+          "active_self_harm"
+        ]
+      },
+      "default": []
+    },
+
+    "technique_tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Named clinical techniques referenced in the chunk (e.g. 'chain analysis', 'imaginal exposure', 'TIPP skills', 'Socratic questioning', 'cognitive restructuring', 'behavioral activation', 'interpersonal incident review'). Gemini-extracted proper technique names — distinct from keywords (topic terms). 0–10 items.",
+      "default": []
+    },
+
+    "keywords": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Key topic terms extracted by Gemini. 3–10 terms.",
+      "default": []
+    },
+
+    "clinical_caution": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Free field explicit contraindications or precautions stated in the chunk (e.g. 'contraindicated without prior stabilization work', 'requires dissociation assessment before proceeding', 'not appropriate in first three sessions'). The RTA system must surface caution flags alongside technique recommendations — not suppress them. Patient safety field: a technique recommended without its documented contraindication is dangerous. Display text surfaced alongside content; directionality + applies_when drives retrieval. 0–5 items.",
+      "default": []
+    },
+
+
+    "risk_dimension_tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "suicide_ideation_chronic",
+          "self_harm_nonsuicidal",
+          "homicide_risk",
+          "substance_relapse_monitoring",
+          "psychotic_decompensation",
+          "eating_disorder_medical_risk"
+        ]
+      },
+      "description": "Ongoing risk monitoring dimensions this chunk addresses — distinct from crisis_escalation in session_event_tags, which is acute. Drives a patient-risk-profile preload at session start (what must be monitored regardless of what is being treated). self_harm_nonsuicidal=NSSI pattern monitoring between episodes.",
+      "default": []
+    },
+
+
+
+    "patient_population": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "adult_general",
+          "adult_older",
+          "adolescent",
+          "child",
+          "veteran_military",
+          "first_responder",
+          "perinatal",
+          "lgbtq",
+          "bipoc",
+          "low_income",
+          "chronic_medical_illness",
+          "severe_mental_illness",
+          "forensic",
+          "cross_cultural",
+          "not_specified"
+        ]
+      },
+      "description": "Population for whom this chunk's evidence or recommendation applies. Critical for treatment matching — prevents an adult veteran PTSD sample from being weighted equally with a civilian adolescent sample. bipoc is a broad designation; specify population in subdomain. Used as a ranking moderator, not a hard filter.",
+      "default": ["not_specified"]
+    },
+
+    "clinical_measure_tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "PHQ-9", "GAD-7", "PCL-5", "BDI-II", "DASS-21",
+          "HAM-D", "MADRS", "BAI", "SPIN",
+          "ORS", "SRS", "PCOMS", "OQ-45", "CORE-OM",
+          "C-SSRS",
+          "AUDIT", "DAST",
+          "MDQ", "HCL-32",
+          "WHODAS", "SF-36", "WHOQOL",
+          "IES-R", "DES", "EDE-Q",
+          "other"
+        ]
+      },
+      "description": "Clinical instruments referenced, normed, or interpreted in the chunk. Use exact canonical abbreviation; normalize variants in _fallback_extraction (PHQ9 / PHQ 9 / Patient Health Questionnaire-9 -> PHQ-9; Columbia / Columbia Suicide Severity Rating Scale -> C-SSRS). Enables routing to instrument-specific guidance.",
+      "default": []
+    }
+  },
+  "additionalProperties": false,
+
+  "if": {
+    "properties": { "directionality": { "enum": ["contraindicated", "cautionary"] } },
+    "required": ["directionality"]
+  },
+  "then": {
+    "properties": { "applies_when": { "minItems": 1 } }
+  },
+
+  "notes": {
+    "reconciled": "2026-07-20 — notes rewritten to the active 23-field RTA schema. Obsolete notes (routing_safety, representation_and_implementation_fields, recommended_change_items) were deleted; their history lives in config/CHANGELOG.md. Field descriptions are read into the Gemini ingestion prompt, so they are kept short, definitional, and free of references to fields that no longer exist.",
+    "vertex_ai_search": "Scalar string/integer fields are registered as filterable attributes in the DataStore schema. Array fields MUST be explicitly registered as filterable (indexable) in scripts/setup_vertex_search.py or filters silently no-op: therapeutic_modality, clinical_presentation, session_event_tags, applies_when, risk_dimension_tags, patient_population, clinical_measure_tags, technique_tags, clinical_caution. keywords is informational. Verify registration after every schema change; an unregistered filterable array fails silently. Schema changes require purge_datastore.py --confirm followed by full re-ingestion.",
+    "domain_vs_modality": "domain is a document-level property assigned from the source's primary orientation (set once per document). therapeutic_modality is a chunk-level property extracted from passage content and may differ from the document's domain. This distinction must appear in the Gemini extraction prompt to prevent inconsistent tagging.",
+    "directionality_applies_when": "directionality and applies_when are ONE unit. Never read, write, validate, or filter on one without the other. A contraindicated/cautionary chunk with empty applies_when is a data error (enforced by the schema if/then). Multiple applies_when values are OR. Contraindications are never dropped by a relevance threshold at retrieval time.",
+    "removed_fields": "Removed from the prior unified schema for the RTA scope: entities (superseded by technique_tags) and evidence_level GRADE A/B/C/D (superseded by directionality). The ASA-only routing and source-provenance fields (corpus_scope, analysis_function, evidence_base, time_horizon, target_audience, practice_recommendation_level, training_level_required, outcome_measure_tags, population_focus, source_language, setting, adaptation_status, missingness, presentation_coverage, study_type, sample_size, intended_use_context) live in metadata_schema.json for future ASA work. ingestion/metadata_gen.py _fallback_extraction must not populate any of these."
+  }
+}
