@@ -45,7 +45,7 @@ from scripts._gcp_logging import log_api_error, setup_logging
 from config.settings import settings
 from ingestion.extractor import PDFExtractor
 from ingestion.chunker import ContextAwareChunker
-from ingestion.metadata_gen import MetadataGenerator
+from ingestion.metadata_gen import GeminiModelUnavailableError, MetadataGenerator
 from ingestion.uploader import GCSUploader
 from ingestion.indexer import VertexSearchIndexer
 from ingestion.processing_strategy import ProcessingStrategy, build_strategy
@@ -98,6 +98,12 @@ def _generate_all_metadata(
                     chunk.metadata = metadata
                     with lock:
                         _append_metadata_checkpoint(checkpoint_path, chunk)
+                except GeminiModelUnavailableError:
+                    # Defense in depth: verify_model_available() already checks
+                    # this at startup, but if it somehow reaches here mid-run,
+                    # every remaining chunk would fail identically — stop the
+                    # batch instead of quietly degrading the whole corpus.
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("  Metadata failed for %s: %s", chunk.chunk_id, exc)
                     with lock:
@@ -408,6 +414,11 @@ def main() -> None:
             model_name=settings.gemini_model_metadata,
             schema_path=settings.metadata_schema_path,
         )
+        # Fail fast on a model that isn't actually servable in GCP_LOCATION —
+        # models.list()/get() report it as present even when it isn't (only a
+        # real generate_content call proves it), so without this the batch would
+        # silently fall back to degraded rule-based tagging for every chunk.
+        metadata_gen.verify_model_available()
         uploader = GCSUploader(
             bucket_name=settings.gcs_bucket_name,
             project_id=settings.gcp_project_id,

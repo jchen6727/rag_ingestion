@@ -15,7 +15,8 @@ Usage:
     # Check a specific model:
     PYTHONPATH=. python scripts/check_llm.py --model gemini-1.5-pro
 
-    # List models your project can use in this Vertex location:
+    # List models actually servable in this Vertex location (one real ping per
+    # candidate model — not just what the model catalog lists):
     PYTHONPATH=. python scripts/check_llm.py --list
 """
 
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -69,16 +71,73 @@ def main() -> None:
 
     try:
         if args.list:
-            print(f"Models available to '{settings.gcp_project_id}' in Vertex location "
-                  f"'{settings.gcp_location}':")
-            found = False
+            # client.models.list() queries a global model-garden catalog, NOT
+            # per-location deployment — it lists a model as present even when
+            # it isn't actually servable in settings.gcp_location (confirmed
+            # 2026-08-20: gemini-3.6-flash showed up here for 'us-central1' but
+            # 404'd on a real call). So this makes one minimal generate_content
+            # ping per candidate model — the only reliable availability signal
+            # — concurrently, and only prints the ones that actually work.
+            candidates = []
             for m in client.models.list():
-                actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", [])
-                if (not actions) or ("generateContent" in actions):
-                    print(f"  {m.name}")
-                    found = True
-            if not found:
-                print("  (none returned — check the location and that Vertex/Gemini is enabled)")
+                name = m.name.rsplit("/", 1)[-1]
+                # The catalog also lists non-chat models (embeddings, Veo, Imagen,
+                # AutoML, medical/vision foundation models, ...) that don't take
+                # generateContent at all and would just waste a probe call and
+                # clutter the output. metadata_gen only ever uses a "gemini-*"
+                # text model, so restrict probing to those.
+                if not name.startswith("gemini-"):
+                    continue
+                if "tts" in name or "audio" in name or "image" in name or "embedding" in name:
+                    continue
+                candidates.append(name)
+
+            if not candidates:
+                print(f"No candidate models returned for '{settings.gcp_project_id}' — "
+                      f"check the location and that Vertex/Gemini is enabled.")
+                return
+
+            print(f"Checking {len(candidates)} candidate model(s) against Vertex location "
+                  f"'{settings.gcp_location}' (this makes one real call per model)...")
+
+            def _probe(name: str) -> tuple[str, bool, str]:
+                try:
+                    resp = client.models.generate_content(
+                        model=name,
+                        contents="ping",
+                        config=types.GenerateContentConfig(max_output_tokens=1, temperature=0.0),
+                    )
+                    _ = resp.text
+                    return name, True, ""
+                except Exception as exc:  # noqa: BLE001
+                    return name, False, str(exc)
+
+            results = []
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [pool.submit(_probe, name) for name in candidates]
+                for fut in as_completed(futures):
+                    results.append(fut.result())
+            results.sort(key=lambda r: r[0])
+
+            servable = [r for r in results if r[1]]
+            unservable = [r for r in results if not r[1]]
+
+            print(f"\nServable in '{settings.gcp_location}' ({len(servable)}/{len(results)}):")
+            for name, _ok, _err in servable:
+                print(f"  ✓ {name}")
+            if not servable:
+                print("  (none — check the location and that Vertex/Gemini is enabled)")
+
+            if unservable:
+                print(f"\nListed but NOT servable here ({len(unservable)}) — "
+                      f"present in the model catalog but 404s on a real call:")
+                for name, _ok, err in unservable:
+                    if args.verbose:
+                        print(f"  ✗ {name}: {err}")
+                    else:
+                        print(f"  ✗ {name}")
+                if not args.verbose:
+                    print("  (re-run with --verbose for the underlying error on each)")
             return
 
         # Definitive check: a minimal generation. Confirms the model is reachable

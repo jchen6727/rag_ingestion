@@ -38,6 +38,7 @@ _NOISY_LOGGERS = (
     "google.auth",
     "google.api_core",
     "google.cloud",
+    "google_genai",       # google-genai SDK's "AFC is enabled..." per-call chatter
     "grpc",
     "urllib3",
     "httpx",             # sentence-transformers/huggingface model download chatter

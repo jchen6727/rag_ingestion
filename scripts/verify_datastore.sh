@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Configuration variables
-PROJECT_ID="jchen-6727"
-LOCATION="us"
-DATA_STORE_ID="your-datastore-id" # Replace with your actual datastore ID
+PROJECT_ID="brk-prj-salvador-dura-bern-sbx"
+LOCATION="us-central1"
+DATA_STORE_ID="rag-v1-0" # Replace with your actual datastore ID
 
 echo "Fetching schema for Data Store: $DATA_STORE_ID..."
 

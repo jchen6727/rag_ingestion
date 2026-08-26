@@ -82,6 +82,18 @@ class MetadataGenerator:
         # back to built-in defaults if the file is missing or unreadable.
         self._prompt_cfg = self._load_prompt_config()
         self._client: Optional[genai.Client] = None
+        self._model_verified = False
+
+    def verify_model_available(self) -> None:
+        """Eagerly confirm the configured model is servable, before any chunks
+        are processed. Call this once at startup (see batch_ingest.py) so a
+        misconfigured/unavailable model fails fast with one clear error instead
+        of degrading every chunk to fallback metadata over a long batch run.
+
+        Raises:
+            GeminiModelUnavailableError: If the model can't be reached.
+        """
+        self._get_client()
 
     def generate(self, chunk: Chunk, context_window: str = "") -> ChunkMetadata:
         """Generate metadata for a single chunk.
@@ -103,6 +115,12 @@ class MetadataGenerator:
             prompt = self._build_extraction_prompt(chunk, context_window)
             raw = self._call_gemini(prompt)
             return self._validate_and_coerce(raw, chunk)
+        except GeminiModelUnavailableError:
+            # Not a per-chunk fluke — the configured model can't be served at all
+            # in this location. Falling back would silently tag the entire corpus
+            # with degraded rule-based metadata instead of surfacing the real
+            # problem, so this propagates and stops the run.
+            raise
         except Exception as exc:
             logger.warning(
                 "Metadata generation failed for chunk %s: %s — using fallback",
@@ -420,13 +438,54 @@ class MetadataGenerator:
             Configured ``google.genai.Client``.
         """
         if self._client is None:
-            self._client = genai.Client(
+            client = genai.Client(
                 vertexai=True,
                 project=settings.gcp_project_id,
                 location=settings.gcp_location,
             )
+            self._verify_model_available(client)
+            self._client = client
         return self._client
+
+    def _verify_model_available(self, client: genai.Client) -> None:
+        """Confirm ``self._model_name`` is actually servable in ``gcp_location``.
+
+        ``client.models.get()`` / ``.list()`` are NOT sufficient here: they hit a
+        global model-garden catalog and report a model as present even when it
+        isn't deployed to the client's configured region — verified empirically
+        (2026-08-20, see CHANGELOG). A real ``generate_content`` call is the only
+        signal that matches what ``_call_gemini`` will actually do. This runs once
+        per process (cached via ``_model_verified``) and raises immediately rather
+        than letting a 404 surface only after per-chunk retries — that previously
+        looked like a transient error and, absent this check, would have been
+        swallowed by ``generate()``'s fallback path for every chunk in the corpus.
+        """
+        if self._model_verified:
+            return
+        try:
+            client.models.generate_content(
+                model=self._model_name,
+                contents="ping",
+                config=types.GenerateContentConfig(max_output_tokens=1, temperature=0.0),
+            )
+        except Exception as exc:
+            raise GeminiModelUnavailableError(
+                f"Gemini model '{self._model_name}' is not usable in Vertex AI "
+                f"location '{settings.gcp_location}' (project "
+                f"'{settings.gcp_project_id}'). It may only be available in a "
+                f"different region (e.g. 'global') than GCP_LOCATION. Run "
+                f"`PYTHONPATH=. python scripts/check_llm.py --list` to see what's "
+                f"servable here, then update GEMINI_MODEL_METADATA in .env.\n"
+                f"Underlying error: {exc}"
+            ) from exc
+        self._model_verified = True
 
 
 class GeminiExtractionError(Exception):
     """Raised when Gemini metadata extraction fails after all retries."""
+
+
+class GeminiModelUnavailableError(Exception):
+    """Raised when the configured Gemini model cannot be served in the
+    configured Vertex AI location. Fatal — never caught by the per-chunk
+    fallback path, since it means every chunk would fail the same way."""

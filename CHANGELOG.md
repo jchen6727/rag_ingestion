@@ -10,6 +10,50 @@ All notable changes to this package.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Fixed
+- **`batch_ingest.py` silently degrading to fallback metadata when the
+  configured Gemini model isn't servable in `GCP_LOCATION`** (2026-08-20):
+  `gemini-3.6-flash` appeared in `client.models.list()` / `.get()` (both of
+  which query a global model-garden catalog, not the client's configured
+  region) and so looked available, but a real `generate_content` call against
+  `us-central1` returned `404 NOT_FOUND` — as of this writing the model is only
+  servable via the `global` Vertex AI location, not `us-central1` (or any other
+  region-scoped endpoint tested). Because `metadata_gen.py::generate()` catches
+  all exceptions per chunk and falls back to rule-based extraction, this
+  previously failed *silently*: three retries of the same 404 per chunk,
+  logged only as `WARNING`, then the entire corpus got tagged with degraded
+  fallback metadata instead of the run stopping.
+  - `ingestion/metadata_gen.py`: added `GeminiModelUnavailableError` and
+    `MetadataGenerator._verify_model_available()`, which makes one real
+    `generate_content` call (the only reliable availability signal) the first
+    time the client is initialized, cached for the process lifetime. `generate()`
+    now re-raises this error instead of swallowing it into the fallback path.
+  - `scripts/batch_ingest.py`: calls `metadata_gen.verify_model_available()`
+    once at startup, inside the existing client-init `try/except` that already
+    exits with code 1 on failure — so a bad model now aborts before any file is
+    processed, not partway through with degraded output.
+  - `scripts/preflight_check.sh`: added a check (section 6) that makes the same
+    real `generateContent` REST call for `GEMINI_MODEL_METADATA` against
+    `GCP_LOCATION` before any provisioning, with a pointer to
+    `check_llm.py --list` to find a model that IS servable in the region.
+  - `scripts/check_llm.py --list` had the same catalog-vs-servable gap — it
+    printed every model the catalog listed as "available", `gemini-3.6-flash`
+    included. It now probes each candidate `gemini-*` model with a real
+    `generate_content` ping (concurrently) and splits the output into
+    "servable here" vs. "listed but not servable here", so it actually answers
+    the question it claims to.
+  - `scripts/_gcp_logging.py`: added `google_genai` to the noisy-logger list —
+    it's a separate root logger from `google.*`, so its "AFC is enabled..."
+    line was printing once per API call regardless of `--verbose`.
+  - `GCP_LOCATION` is intentionally left as a hard compute-region setting (used
+    by Discovery Engine/GCS routing too) — the fix does not attempt to route
+    Gemini calls to a different location. To resolve the actual 404, set
+    `GEMINI_MODEL_METADATA` in `.env` to a model already available in your
+    `GCP_LOCATION` (verify with `scripts/check_llm.py --list`), or wait for the
+    model to roll out to that region.
+
 ## [0.1.0] — Initial internal release (extracted 2026-07-30)
 
 First standalone release for the internal clinical liaison team: PDF ingestion,

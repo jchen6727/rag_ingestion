@@ -265,7 +265,48 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. IAM permissions required by setup_vertex_search.py
+# 6. GEMINI_MODEL_METADATA is actually servable in GCP_LOCATION
+# ---------------------------------------------------------------------------
+# `gcloud ai models list` / the genai SDK's client.models.list()/.get() hit a
+# global model-garden catalog and report a model as available even when it is
+# NOT deployed to a specific compute region — verified empirically 2026-08-20:
+# gemini-3.6-flash showed up in `client.models.list()` (which defaults to the
+# 'global' Vertex location) and even `client.models.get()` at 'us-central1',
+# yet a real generateContent call against 'us-central1' 404s. Only an actual
+# generateContent call is a reliable signal, so that's what this does — the
+# same check ingestion/metadata_gen.py::_verify_model_available performs at
+# runtime, just surfaced here before any provisioning/ingestion begins.
+GEMINI_MODEL_METADATA="${GEMINI_MODEL_METADATA:-}"
+if [[ -z "${GEMINI_MODEL_METADATA}" ]]; then
+    warn "GEMINI_MODEL_METADATA is not set — skipping model-availability check (metadata_gen.py will use its own default)."
+elif [[ -z "${ACCESS_TOKEN}" ]]; then
+    fail "Cannot check Gemini model availability: no Application Default Credentials access token available"
+    fix "gcloud auth application-default login"
+else
+    GEMINI_CHECK_ENDPOINT="${GCP_LOCATION}-aiplatform.googleapis.com"
+    if [[ "${GCP_LOCATION}" == "global" ]]; then
+        GEMINI_CHECK_ENDPOINT="aiplatform.googleapis.com"
+    fi
+    GEMINI_RESPONSE_FILE="$(mktemp)"
+    GEMINI_HTTP_STATUS="$(curl -s -o "${GEMINI_RESPONSE_FILE}" -w '%{http_code}' -X POST \
+        -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+        -H "Content-Type: application/json" \
+        "https://${GEMINI_CHECK_ENDPOINT}/v1/projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}/publishers/google/models/${GEMINI_MODEL_METADATA}:generateContent" \
+        -d '{"contents":[{"role":"user","parts":[{"text":"ping"}]}],"generationConfig":{"maxOutputTokens":1}}')"
+    if [[ "${GEMINI_HTTP_STATUS}" == "200" ]]; then
+        pass "Gemini model '${GEMINI_MODEL_METADATA}' is servable in location '${GCP_LOCATION}'"
+    else
+        fail "Gemini model '${GEMINI_MODEL_METADATA}' is NOT servable in location '${GCP_LOCATION}' (HTTP ${GEMINI_HTTP_STATUS}): $(cat "${GEMINI_RESPONSE_FILE}" | tr -d '\n' | head -c 300)"
+        fix "PYTHONPATH=. python scripts/check_llm.py --list   # see what IS servable in ${GCP_LOCATION}
+# Then set GEMINI_MODEL_METADATA in .env to one of those models.
+# (GCP_LOCATION stays ${GCP_LOCATION} — new Gemini models roll out to specific
+# regions on a delay, so pick a model that has already reached this region.)"
+    fi
+    rm -f "${GEMINI_RESPONSE_FILE}"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. IAM permissions required by setup_vertex_search.py
 # ---------------------------------------------------------------------------
 # Full end-to-end permission set: provisioning (setup_vertex_search.py),
 # ingestion import + review (batch_ingest.py, review_datastore.py), purge
