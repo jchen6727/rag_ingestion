@@ -13,6 +13,13 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Fixed
+- **`batch_ingest.py` failing LRO calls at the end of metadata generation.
+  ** (2026-08-31)
+  - `ingestion/indexer.py` `_transport.operations_client` object in 
+    `discoveryengine.DocumentServiceClient`, method `.get_operation` incorrectly 
+    handled (need to provide a string to `name`). Additionally, the op returned 
+    by the method has metadata and response error values that must be retrieved
+    separately.
 - **`batch_ingest.py` silently degrading to fallback metadata when the
   configured Gemini model isn't servable in `GCP_LOCATION`** (2026-08-20):
   `gemini-3.6-flash` appeared in `client.models.list()` / `.get()` (both of

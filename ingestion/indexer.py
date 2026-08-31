@@ -170,7 +170,7 @@ class VertexSearchIndexer:
                 )
 
             op = ops_client.get_operation(
-                GetOperationRequest(name=operation_name),
+                name=operation_name,
                 timeout=_RPC_TIMEOUT,
             )
 
@@ -179,13 +179,13 @@ class VertexSearchIndexer:
                     raise ImportError(
                         f"Import LRO failed: {op.error.message} (code {op.error.code})"
                     )
-                metadata = discoveryengine.ImportDocumentsMetadata()
-                op.metadata.Unpack(metadata)
+                metadata = discoveryengine.ImportDocumentsMetadata.deserialize(op.metadata.value)
+                response = discoveryengine.ImportDocumentsResponse.deserialize(op.response.value)
                 return self._parse_import_result(
                     {
                         "successCount": metadata.success_count,
                         "failureCount": metadata.failure_count,
-                        "errorSamples": list(metadata.error_samples),
+                        "errorSamples": list(response.error_samples),
                     }
                 )
 
