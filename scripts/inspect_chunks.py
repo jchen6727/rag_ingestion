@@ -51,6 +51,7 @@ from scripts._gcp_logging import log_api_error, setup_logging
 from config.settings import settings
 from ingestion.chunker import ChunkerConfig, ContextAwareChunker
 from ingestion.extractor import PDFExtractor
+from ingestion.llm import log_llm_error
 from models import Chunk, ChunkMetadata
 
 logger = None  # set in main() via setup_logging
@@ -91,8 +92,11 @@ def _generate_metadata(gen, chunk: Chunk, source_file: str) -> tuple[ChunkMetada
     """Generate metadata for one chunk, surfacing (not swallowing) API failures.
 
     Mirrors MetadataGenerator.generate() but reports whether Gemini succeeded or
-    the rule-based fallback was used, and logs the underlying Google error with an
-    actionable hint so failures are debuggable.
+    the rule-based fallback was used. Failures are logged with log_llm_error,
+    which — unlike the older log_api_error — prints the actual raw text Gemini
+    produced when gen._validate_and_coerce() rejects it (non-JSON output, or a
+    response that doesn't match the schema after coercion), instead of just a
+    generic Google-error hint with no indication of what the model said.
 
     Returns:
         (metadata, status) where status is "ok" or "fallback".
@@ -103,7 +107,7 @@ def _generate_metadata(gen, chunk: Chunk, source_file: str) -> tuple[ChunkMetada
         md = gen._validate_and_coerce(raw, chunk)
         status = "ok"
     except Exception as exc:  # noqa: BLE001 — we want every failure class here
-        log_api_error(logger, exc, f"tagging chunk {chunk.chunk_id}")
+        log_llm_error(logger, exc, f"tagging chunk {chunk.chunk_id}")
         md = gen._fallback_extraction(chunk)
         status = "fallback"
     md.source_file = source_file
@@ -283,11 +287,17 @@ def main() -> None:
     gen = None
     if not args.no_metadata:
         # Imported lazily so --no-metadata never even loads the Gemini client.
-        from ingestion.metadata_gen import MetadataGenerator
-        gen = MetadataGenerator(
-            model_name=settings.gemini_model_metadata,
-            schema_path=settings.metadata_schema_path,  # active RTA schema (rta_v1.json)
-        )
+        from ingestion.metadata_gen import IngestionPromptConfigError, MetadataGenerator
+        try:
+            gen = MetadataGenerator(
+                model_name=settings.gemini_model_metadata,
+                schema_path=settings.metadata_schema_path,  # active RTA schema (rta_v1.json)
+            )
+        except IngestionPromptConfigError as exc:
+            parser.error(
+                "config/ingestion_prompt.yaml is invalid — fix it (or delete it to "
+                f"use built-in defaults) and re-run:\n{exc}"
+            )
         logger.info("Metadata schema: %s", settings.metadata_schema_path)
 
     results = []

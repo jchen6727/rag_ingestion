@@ -89,6 +89,33 @@ class GCSUploader:
         chunks_blob = bucket.blob(self._gcs_chunks_path(doc_id))
         return pdf_blob.exists() and chunks_blob.exists()
 
+    def gcs_pdf_uri(self, doc_id: str) -> str:
+        """Return the gs:// URI a PDF for doc_id would be (or already is) at,
+        without touching GCS. Lets a caller resume straight to a later pipeline
+        stage (e.g. the Vertex AI Search import) using an already-uploaded
+        object, without re-deriving the path itself."""
+        return f"gs://{self._bucket_name}/{self._gcs_pdf_path(doc_id)}"
+
+    def gcs_chunks_uri(self, doc_id: str) -> str:
+        """Return the gs:// URI the chunk JSONL for doc_id would be (or already
+        is) at, without touching GCS. See gcs_pdf_uri()."""
+        return f"gs://{self._bucket_name}/{self._gcs_chunks_path(doc_id)}"
+
+    def count_uploaded_chunks(self, doc_id: str) -> int:
+        """Return the number of chunk lines in the already-uploaded chunks
+        JSONL, or 0 if it doesn't exist.
+
+        Used to report a chunk count when resuming straight from an already-
+        uploaded JSONL (skipping local extraction/chunking) — see
+        is_already_uploaded() and scripts/batch_ingest.py::ingest_file().
+        """
+        client = self._get_client()
+        blob = client.bucket(self._bucket_name).blob(self._gcs_chunks_path(doc_id))
+        if not blob.exists():
+            return 0
+        text = blob.download_as_text()
+        return sum(1 for line in text.splitlines() if line.strip())
+
     def upload_pdf(self, local_path: Path, doc_id: str) -> str:
         """Upload the raw PDF to GCS.
 
@@ -106,7 +133,7 @@ class GCSUploader:
             google.cloud.exceptions.GoogleCloudError: On upload failure.
         """
         object_path = self._gcs_pdf_path(doc_id)
-        gcs_uri = f"gs://{self._bucket_name}/{object_path}"
+        gcs_uri = self.gcs_pdf_uri(doc_id)
 
         client = self._get_client()
         bucket = client.bucket(self._bucket_name)

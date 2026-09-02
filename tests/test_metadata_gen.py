@@ -16,7 +16,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ingestion.metadata_gen import GeminiExtractionError, MetadataGenerator
+from ingestion.metadata_gen import (
+    GeminiExtractionError,
+    IngestionPromptConfigError,
+    MetadataGenerator,
+)
 from models import Chunk, ChunkMetadata
 
 
@@ -258,3 +262,92 @@ class TestGenerateBatch:
         assert len(results) == 2
         assert results[0].doc_id == chunk_a.doc_id
         assert results[1].doc_id == chunk_b.doc_id
+
+
+# ---------------------------------------------------------------------------
+# MetadataGenerator._validate_and_coerce — malformed-output logging
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedOutputCarriesRawText:
+    def test_schema_invalid_response_raises_with_raw_text(
+        self, generator: MetadataGenerator
+    ) -> None:
+        """A response that still fails pydantic validation after coercion should
+        raise GeminiExtractionError (== LLMGenerationError) carrying the raw
+        response as `raw_text`, not just a terse pydantic message — this is what
+        scripts/inspect_chunks.py and MetadataGenerator.generate() log via
+        log_llm_error() so the actual malformed model output is visible."""
+        chunk = make_chunk()
+        raw = _valid_gemini_response(chunk)
+        # Force coerce() to hand back something pydantic still rejects (a dict
+        # where a list[str] field is expected), independent of how thorough the
+        # real SchemaVocabulary.coerce sanitization is.
+        bad_coerced = dict(raw)
+        bad_coerced["therapeutic_modality"] = {"unexpected": "shape"}
+        with patch.object(generator._vocab, "coerce", return_value=bad_coerced):
+            with pytest.raises(GeminiExtractionError) as excinfo:
+                generator._validate_and_coerce(raw, chunk)
+        assert excinfo.value.raw_text
+        assert "keyword1" in excinfo.value.raw_text  # from _valid_gemini_response
+
+
+# ---------------------------------------------------------------------------
+# MetadataGenerator prompt config loading — config/ingestion_prompt.yaml
+# ---------------------------------------------------------------------------
+
+
+class TestPromptConfigValidation:
+    def test_missing_file_falls_back_to_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("INGESTION_PROMPT_PATH", str(tmp_path / "does_not_exist.yaml"))
+        gen = MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
+        assert gen._prompt_cfg["system_preamble"].strip()
+
+    def test_invalid_yaml_halts_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = tmp_path / "ingestion_prompt.yaml"
+        bad.write_text("{\n")  # unterminated flow mapping — a YAML parse error
+        monkeypatch.setenv("INGESTION_PROMPT_PATH", str(bad))
+        with pytest.raises(IngestionPromptConfigError):
+            MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
+
+    def test_non_mapping_top_level_halts_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = tmp_path / "ingestion_prompt.yaml"
+        bad.write_text("- just\n- a\n- list\n")
+        monkeypatch.setenv("INGESTION_PROMPT_PATH", str(bad))
+        with pytest.raises(IngestionPromptConfigError):
+            MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
+
+    def test_empty_required_field_halts_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = tmp_path / "ingestion_prompt.yaml"
+        bad.write_text("system_preamble: ''\n")
+        monkeypatch.setenv("INGESTION_PROMPT_PATH", str(bad))
+        with pytest.raises(IngestionPromptConfigError):
+            MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
+
+    def test_non_list_guidance_halts_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = tmp_path / "ingestion_prompt.yaml"
+        bad.write_text("guidance: 'should be a list, not a string'\n")
+        monkeypatch.setenv("INGESTION_PROMPT_PATH", str(bad))
+        with pytest.raises(IngestionPromptConfigError):
+            MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
+
+    def test_valid_override_is_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        good = tmp_path / "ingestion_prompt.yaml"
+        good.write_text("system_preamble: 'Custom preamble.'\n")
+        monkeypatch.setenv("INGESTION_PROMPT_PATH", str(good))
+        gen = MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
+        assert gen._prompt_cfg["system_preamble"] == "Custom preamble."
+        # Unspecified keys keep their built-in defaults.
+        assert gen._prompt_cfg["closing_instruction"]

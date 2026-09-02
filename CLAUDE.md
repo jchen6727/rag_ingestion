@@ -47,17 +47,38 @@ with `INGEST_STRATEGY` / `INGEST_CONCURRENCY`.
 - **`models.py::ChunkMetadata`** (pydantic) mirrors the 23 schema fields and is
   serialized to Vertex AI Search `structData`. Keep it in sync with `rta_v1.json`
   (guarded by `tests/test_rta_schema.py`).
-- **LLM auth: `google-genai` + Vertex AI via ADC** — no API key.
-  `metadata_gen._get_client()` builds `genai.Client(vertexai=True, project=…,
-  location=GCP_LOCATION)`. `GEMINI_API_KEY` is deprecated/unused.
+- **LLM calls go through `ingestion/llm/`, not `google-genai` directly.**
+  `MetadataGenerator` holds `self._llm: LLMClient` (built via
+  `build_llm_client("gemini", ...)`) and never imports a provider SDK itself;
+  `ingestion/llm/gemini.py::GeminiClient` is the only implementation today and
+  owns the actual `genai.Client(vertexai=True, project=…, location=GCP_LOCATION)`
+  call — no API key (`GEMINI_API_KEY` is deprecated/unused). Add `openai` /
+  `anthropic` / `mistralai` / `openrouter` by writing a new `LLMClient` subclass
+  and registering it in `ingestion/llm/__init__.py::_PROVIDERS`; no caller
+  changes needed. Errors are categorized as `LLMConnectivityError` /
+  `LLMAPIError` / `LLMGenerationError` (malformed model output — carries
+  `raw_text`) / `LLMModelUnavailableError` (fatal), and
+  `ingestion/llm/base.py::log_llm_error()` logs each category differently —
+  in particular, it's what surfaces the actual raw text a model produced when
+  `metadata_gen._validate_and_coerce()` rejects it, instead of a generic
+  Google-error hint with no indication of what the model said.
+  `GeminiExtractionError` / `GeminiModelUnavailableError` are still importable
+  from `ingestion.metadata_gen` as aliases for
+  `LLMGenerationError`/`LLMModelUnavailableError`.
 - **Region routing:** Discovery Engine calls go through
   `settings.discovery_engine_location` / `discovery_engine_endpoint` (derived
   `us`/`eu`/`global` + regional endpoint) — never the raw `gcp_location`. Vertex
   Gemini, by contrast, uses the raw `gcp_location`.
 - **Prompt config:** hand-authored tagging guidance lives in
   `config/ingestion_prompt.yaml` (see `INGESTION_FOR_CLINICIANS.md`); the enum
-  vocabulary is generated from the schema. A missing/invalid file falls back to
-  built-in defaults in `metadata_gen.py`.
+  vocabulary is generated from the schema. A **missing** file falls back to
+  built-in defaults in `metadata_gen.py` (expected/normal). A file that
+  **exists but is invalid** (bad YAML, not a mapping, or missing/empty a
+  required framing key) raises `IngestionPromptConfigError` and halts
+  `MetadataGenerator` construction — `batch_ingest.py` and `inspect_chunks.py`
+  both catch this at startup with an actionable message before any chunk is
+  processed, rather than silently tagging the corpus against unintended
+  defaults.
 - **Processing strategy:** `ingestion/processing_strategy.py` is the extension
   point for how chunks are batched/contextualized. Default `ChapterContextStrategy`
   tags each chunk with its chapter context; chapters run concurrently, chunks
@@ -65,7 +86,16 @@ with `INGEST_STRATEGY` / `INGEST_CONCURRENCY`.
   `_STRATEGIES`.
 - **Checkpoint/resume:** `batch_ingest.py` writes each chunk's metadata to
   `ingestion_checkpoints/<doc_id>.jsonl` as produced; re-running resumes and reuses
-  cached chunks (delete the file to force a full re-tag).
+  cached chunks (delete the file to force a full re-tag). Two granularity levels:
+  - Per-file: `ingest_file()` checks `GCSUploader.is_already_uploaded(doc_id)`
+    *before* extracting/chunking. If this doc_id's chunk JSONL is already in
+    GCS (and neither `--force` nor `--dry-run`), extraction/chunking/metadata
+    are skipped entirely and the Vertex AI Search import LRO is started
+    directly against the existing object — the resume path for a crash
+    between "chunks uploaded" and "import LRO confirmed".
+  - Per-chunk: `_generate_all_metadata()` short-circuits straight to loading
+    cached metadata (no thread pool, no Gemini calls) when the checkpoint
+    already covers every chunk in the document.
 - **Chunk identity:** `chunk_id = f"{doc_id}_{chunk_index:05d}"`, where `doc_id` is
   the SHA-256 of the PDF bytes. It's the Vertex AI Search document ID — keep it
   stable across re-ingestion.

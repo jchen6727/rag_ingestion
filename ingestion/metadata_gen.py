@@ -20,18 +20,35 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from google import genai
-from google.genai import types
+from pydantic import ValidationError
 
 from config.schema_loader import SchemaVocabulary
 from config.settings import settings
+from ingestion.llm import (
+    LLMClient,
+    LLMGenerationError,
+    LLMModelUnavailableError,
+    build_llm_client,
+    log_llm_error,
+)
 from models import Chunk, ChunkMetadata
 
 logger = logging.getLogger(__name__)
 
-# Default retry parameters for Gemini API calls
-_MAX_RETRIES = 3
-_RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt
+# Backward-compatible aliases: this module used to define these exceptions
+# itself (pre-LLM-abstraction). They now live in ingestion/llm/base.py so any
+# provider can raise them, but the names are kept here since callers
+# (scripts/batch_ingest.py, tests) import them from ingestion.metadata_gen.
+GeminiExtractionError = LLMGenerationError
+GeminiModelUnavailableError = LLMModelUnavailableError
+
+
+class IngestionPromptConfigError(Exception):
+    """Raised when config/ingestion_prompt.yaml exists but is malformed or
+    missing required keys. Fatal — propagates out of MetadataGenerator.__init__
+    so ingestion halts before any chunk is tagged against a broken/unintended
+    prompt, rather than silently degrading to built-in defaults."""
+
 
 # The controlled vocabulary (valid domains, doc_types, enums, array fields, and
 # defaults) is NOT hard-coded here — it is derived from config/metadata_schema.json
@@ -81,8 +98,11 @@ class MetadataGenerator:
         # Hand-authored prompt scaffolding (config/ingestion_prompt.yaml); falls
         # back to built-in defaults if the file is missing or unreadable.
         self._prompt_cfg = self._load_prompt_config()
-        self._client: Optional[genai.Client] = None
-        self._model_verified = False
+        # LLM calls are delegated to a provider-agnostic LLMClient (see
+        # ingestion/llm/) rather than talking to google-genai directly, so the
+        # backend can be swapped (openai/anthropic/mistralai/openrouter) by
+        # changing this one call.
+        self._llm: LLMClient = build_llm_client("gemini", model_name=model_name)
 
     def verify_model_available(self) -> None:
         """Eagerly confirm the configured model is servable, before any chunks
@@ -93,7 +113,7 @@ class MetadataGenerator:
         Raises:
             GeminiModelUnavailableError: If the model can't be reached.
         """
-        self._get_client()
+        self._llm.verify_model_available()
 
     def generate(self, chunk: Chunk, context_window: str = "") -> ChunkMetadata:
         """Generate metadata for a single chunk.
@@ -115,18 +135,17 @@ class MetadataGenerator:
             prompt = self._build_extraction_prompt(chunk, context_window)
             raw = self._call_gemini(prompt)
             return self._validate_and_coerce(raw, chunk)
-        except GeminiModelUnavailableError:
+        except LLMModelUnavailableError:
             # Not a per-chunk fluke — the configured model can't be served at all
             # in this location. Falling back would silently tag the entire corpus
             # with degraded rule-based metadata instead of surfacing the real
             # problem, so this propagates and stops the run.
             raise
         except Exception as exc:
-            logger.warning(
-                "Metadata generation failed for chunk %s: %s — using fallback",
-                chunk.chunk_id,
-                exc,
-            )
+            # log_llm_error surfaces the raw model output for LLMGenerationError
+            # (malformed/unparseable JSON) rather than discarding it — that text
+            # is otherwise the only evidence of why a chunk fell back.
+            log_llm_error(logger, exc, f"tagging chunk {chunk.chunk_id}")
             return self._fallback_extraction(chunk)
 
     def generate_batch(
@@ -260,33 +279,86 @@ class MetadataGenerator:
         "closing_instruction": "Output valid JSON only.",
     }
 
+    # Keys that must be a non-empty string; enforced by _validate_prompt_config.
+    _REQUIRED_PROMPT_STR_KEYS = (
+        "system_preamble",
+        "output_instruction",
+        "allowed_values_header",
+        "closing_instruction",
+    )
+
     def _load_prompt_config(self) -> dict:
         """Load config/ingestion_prompt.yaml, merged over the built-in defaults.
 
-        Any key the file omits (or the whole file, if missing/invalid) falls back
-        to ``_DEFAULT_PROMPT_CFG`` so a bad edit degrades gracefully rather than
-        breaking ingestion.
+        A MISSING file is the documented, expected case (see the file's own
+        header comment) — it falls back to ``_DEFAULT_PROMPT_CFG`` with an INFO
+        log, same as before. A file that EXISTS but fails to parse, isn't a
+        mapping, or is missing/mistypes required keys is an operator mistake:
+        this now raises and halts construction instead of silently tagging the
+        whole corpus with defaults nobody asked for — the same fail-fast
+        philosophy as GeminiModelUnavailableError for a bad Gemini model.
+
+        Raises:
+            IngestionPromptConfigError: If the file exists but is invalid.
         """
         cfg = dict(self._DEFAULT_PROMPT_CFG)
+        path = settings.ingestion_prompt_path
+        if not path.exists():
+            logger.info("No ingestion prompt config at %s; using built-in defaults.", path)
+            return cfg
+
+        import yaml  # local import: metadata_gen has no hard yaml dependency otherwise
+
         try:
-            import yaml  # local import: metadata_gen has no hard yaml dependency otherwise
+            loaded = yaml.safe_load(path.read_text())
+        except (yaml.YAMLError, OSError) as exc:
+            raise IngestionPromptConfigError(f"Could not parse {path}: {exc}") from exc
 
-            from config.settings import settings
+        loaded = loaded if loaded is not None else {}
+        if not isinstance(loaded, dict):
+            raise IngestionPromptConfigError(
+                f"{path} must be a YAML mapping at the top level; got "
+                f"{type(loaded).__name__}."
+            )
 
-            path = settings.ingestion_prompt_path
-            if path.exists():
-                loaded = yaml.safe_load(path.read_text()) or {}
-                if isinstance(loaded, dict):
-                    cfg.update({k: v for k, v in loaded.items() if v is not None})
-        except Exception as exc:  # noqa: BLE001 — never fail ingestion on prompt config
-            logger.warning("Could not load ingestion prompt config (%s); using defaults.", exc)
+        cfg.update({k: v for k, v in loaded.items() if v is not None})
+        self._validate_prompt_config(cfg, path)
         return cfg
 
-    def _call_gemini(self, prompt: str) -> dict:
-        """Send prompt to Gemini and return the parsed JSON response.
+    def _validate_prompt_config(self, cfg: dict, path: Path) -> None:
+        """Validate the shape of a loaded ingestion_prompt.yaml (post-merge).
 
-        Uses response_mime_type="application/json" to request structured output.
-        Retries on transient errors with exponential backoff.
+        Checks the fields ``_build_extraction_prompt`` / ``_extraction_guidance``
+        actually depend on: the four scalar framing strings must be non-empty
+        strings, and ``guidance`` (if present) must be a list of strings.
+
+        Raises:
+            IngestionPromptConfigError: Listing every problem found, so an
+                operator can fix them all in one pass instead of one-at-a-time.
+        """
+        problems: list[str] = []
+        for key in self._REQUIRED_PROMPT_STR_KEYS:
+            val = cfg.get(key)
+            if not isinstance(val, str) or not val.strip():
+                problems.append(f"'{key}' must be a non-empty string (got {val!r})")
+
+        guidance = cfg.get("guidance", [])
+        if not isinstance(guidance, list) or not all(isinstance(g, str) for g in guidance):
+            problems.append("'guidance' must be a list of strings")
+
+        if problems:
+            raise IngestionPromptConfigError(
+                f"Invalid {path}:\n" + "\n".join(f"  - {p}" for p in problems)
+            )
+
+    def _call_gemini(self, prompt: str) -> dict:
+        """Send prompt to the configured LLM and return the parsed JSON response.
+
+        Thin compatibility wrapper around ``self._llm.generate_json()`` — the
+        retry/backoff, transport-vs-API-vs-generation error categorization, and
+        provider SDK call all live in the LLMClient (see ingestion/llm/). Kept
+        as a method (rather than inlining the call at each call site) so
+        existing callers/tests that reference ``_call_gemini`` keep working.
 
         Args:
             prompt: The full extraction prompt.
@@ -295,40 +367,12 @@ class MetadataGenerator:
             Parsed dict from the model's JSON response.
 
         Raises:
-            GeminiExtractionError: If all retries are exhausted or the response
-                                   cannot be parsed as JSON.
+            LLMConnectivityError, LLMAPIError: Transient/request failures after
+                                                all retries are exhausted.
+            LLMGenerationError: The response could not be parsed as JSON
+                                 (aliased as GeminiExtractionError).
         """
-        client = self._get_client()
-        last_exc: Exception = RuntimeError("No attempts made")
-        delay = _RETRY_BASE_DELAY
-
-        for attempt in range(_MAX_RETRIES):
-            try:
-                response = client.models.generate_content(
-                    model=self._model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=self._temperature,
-                        response_mime_type="application/json",
-                    ),
-                )
-                return json.loads(response.text)
-            except json.JSONDecodeError as exc:
-                raise GeminiExtractionError(
-                    f"Gemini returned non-JSON response: {exc}"
-                ) from exc
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(
-                    "Gemini call attempt %d/%d failed: %s", attempt + 1, _MAX_RETRIES, exc
-                )
-                if attempt < _MAX_RETRIES - 1:
-                    time.sleep(delay)
-                    delay *= 2
-
-        raise GeminiExtractionError(
-            f"All {_MAX_RETRIES} Gemini attempts failed: {last_exc}"
-        ) from last_exc
+        return self._llm.generate_json(prompt, temperature=self._temperature)
 
     def _validate_and_coerce(self, raw: dict, chunk: Chunk) -> ChunkMetadata:
         """Validate the Gemini response dict against the schema and coerce types.
@@ -350,8 +394,12 @@ class MetadataGenerator:
             Valid ChunkMetadata instance.
 
         Raises:
-            ValidationError: If the response is structurally invalid after coercion.
-                             Callers should catch this and call _fallback_extraction.
+            LLMGenerationError: If the response is structurally invalid after
+                coercion. Carries the raw (pre-coercion) Gemini response as
+                `raw_text` so the actual malformed output is visible to callers
+                that log it (see log_llm_error), instead of only the terse
+                pydantic error. Callers should catch this and call
+                _fallback_extraction.
         """
         coerced = self._vocab.coerce(raw)
 
@@ -361,7 +409,14 @@ class MetadataGenerator:
         coerced["page_end"] = chunk.page_end
         coerced["chunk_index"] = chunk.chunk_index
 
-        return ChunkMetadata(**coerced)
+        try:
+            return ChunkMetadata(**coerced)
+        except ValidationError as exc:
+            raise LLMGenerationError(
+                f"Gemini response for chunk {chunk.chunk_id} failed schema "
+                f"validation after coercion: {exc}",
+                raw_text=json.dumps(raw, ensure_ascii=False, indent=2, default=str),
+            ) from exc
 
     def _fallback_extraction(self, chunk: Chunk) -> ChunkMetadata:
         """Produce minimal metadata via rule-based heuristics when Gemini fails.
@@ -425,67 +480,3 @@ class MetadataGenerator:
             raise FileNotFoundError(f"Metadata schema not found: {schema_path}")
         with open(schema_path) as f:
             return json.load(f)
-
-    def _get_client(self) -> genai.Client:
-        """Lazy-initialize and return the Vertex AI Gemini client.
-
-        Uses Vertex AI (``vertexai=True``) with Application Default Credentials —
-        the same auth as the Discovery Engine clients, no API key. The Vertex
-        location is the raw ``gcp_location`` compute region (unlike Discovery
-        Engine, which needs the derived multi-region).
-
-        Returns:
-            Configured ``google.genai.Client``.
-        """
-        if self._client is None:
-            client = genai.Client(
-                vertexai=True,
-                project=settings.gcp_project_id,
-                location=settings.gcp_location,
-            )
-            self._verify_model_available(client)
-            self._client = client
-        return self._client
-
-    def _verify_model_available(self, client: genai.Client) -> None:
-        """Confirm ``self._model_name`` is actually servable in ``gcp_location``.
-
-        ``client.models.get()`` / ``.list()`` are NOT sufficient here: they hit a
-        global model-garden catalog and report a model as present even when it
-        isn't deployed to the client's configured region — verified empirically
-        (2026-08-20, see CHANGELOG). A real ``generate_content`` call is the only
-        signal that matches what ``_call_gemini`` will actually do. This runs once
-        per process (cached via ``_model_verified``) and raises immediately rather
-        than letting a 404 surface only after per-chunk retries — that previously
-        looked like a transient error and, absent this check, would have been
-        swallowed by ``generate()``'s fallback path for every chunk in the corpus.
-        """
-        if self._model_verified:
-            return
-        try:
-            client.models.generate_content(
-                model=self._model_name,
-                contents="ping",
-                config=types.GenerateContentConfig(max_output_tokens=1, temperature=0.0),
-            )
-        except Exception as exc:
-            raise GeminiModelUnavailableError(
-                f"Gemini model '{self._model_name}' is not usable in Vertex AI "
-                f"location '{settings.gcp_location}' (project "
-                f"'{settings.gcp_project_id}'). It may only be available in a "
-                f"different region (e.g. 'global') than GCP_LOCATION. Run "
-                f"`PYTHONPATH=. python scripts/check_llm.py --list` to see what's "
-                f"servable here, then update GEMINI_MODEL_METADATA in .env.\n"
-                f"Underlying error: {exc}"
-            ) from exc
-        self._model_verified = True
-
-
-class GeminiExtractionError(Exception):
-    """Raised when Gemini metadata extraction fails after all retries."""
-
-
-class GeminiModelUnavailableError(Exception):
-    """Raised when the configured Gemini model cannot be served in the
-    configured Vertex AI location. Fatal — never caught by the per-chunk
-    fallback path, since it means every chunk would fail the same way."""

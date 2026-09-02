@@ -45,7 +45,11 @@ from scripts._gcp_logging import log_api_error, setup_logging
 from config.settings import settings
 from ingestion.extractor import PDFExtractor
 from ingestion.chunker import ContextAwareChunker
-from ingestion.metadata_gen import GeminiModelUnavailableError, MetadataGenerator
+from ingestion.metadata_gen import (
+    GeminiModelUnavailableError,
+    IngestionPromptConfigError,
+    MetadataGenerator,
+)
 from ingestion.uploader import GCSUploader
 from ingestion.indexer import VertexSearchIndexer
 from ingestion.processing_strategy import ProcessingStrategy, build_strategy
@@ -73,9 +77,19 @@ def _generate_all_metadata(
         (n_failures, n_reused).
     """
     cache = _load_metadata_checkpoint(checkpoint_path)
+    if cache and _checkpoint_covers_all(chunks, cache):
+        # Every chunk is already tagged (e.g. a prior run crashed after
+        # metadata generation but before/during upload or the import LRO —
+        # see the LRO fix in CHANGELOG.md). No Gemini calls needed at all, so
+        # skip building units/thread pool entirely.
+        logger.info("  Checkpoint %s already covers all %d chunk(s) — no Gemini calls needed.",
+                    checkpoint_path, len(chunks))
+        for c in chunks:
+            c.metadata = ChunkMetadata(**cache[c.chunk_id])
+        return 0, len(chunks)
     if cache:
-        logger.info("  Resuming from checkpoint %s: %d chunk(s) already tagged.",
-                    checkpoint_path, len(cache))
+        logger.info("  Resuming from checkpoint %s: %d/%d chunk(s) already tagged.",
+                    checkpoint_path, len(cache), len(chunks))
     units = strategy.units(chunks)
     n = len(chunks)
     step = max(1, n // 20)  # progress roughly every 5%
@@ -147,6 +161,11 @@ def _load_metadata_checkpoint(path: Path) -> dict[str, dict]:
     return cache
 
 
+def _checkpoint_covers_all(chunks: list, cache: dict[str, dict]) -> bool:
+    """True if every chunk already has cached metadata (no Gemini calls needed)."""
+    return bool(chunks) and all(c.chunk_id in cache for c in chunks)
+
+
 def _append_metadata_checkpoint(path: Path, chunk) -> None:
     """Append one chunk's metadata to the checkpoint JSONL (crash-safe, incremental)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +177,56 @@ def _append_metadata_checkpoint(path: Path, chunk) -> None:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+def _import_existing_chunks(
+    pdf_path: Path,
+    doc_id: str,
+    uploader: GCSUploader,
+    indexer: VertexSearchIndexer,
+    t0: float,
+) -> dict:
+    """Resume straight to the Vertex AI Search import for a doc_id whose PDF and
+    chunk JSONL are already sitting in GCS — skips extraction, chunking, and
+    metadata generation entirely.
+
+    This is the checkpoint short-circuit for the gap between "chunks uploaded"
+    and "import LRO confirmed": a crash there (e.g. the LRO bug fixed in
+    CHANGELOG.md) previously meant re-running from scratch — re-extracting and
+    re-chunking the whole PDF even though nothing about the chunks themselves
+    needed to change. See ingest_file()'s is_already_uploaded() check.
+    """
+    gcs_pdf_uri = uploader.gcs_pdf_uri(doc_id)
+    gcs_chunks_uri = uploader.gcs_chunks_uri(doc_id)
+    n_chunks = uploader.count_uploaded_chunks(doc_id)
+    logger.info(
+        "  %s already uploaded (%d chunk(s)) — skipping extraction, chunking, "
+        "and metadata generation; starting the import LRO directly.",
+        gcs_chunks_uri, n_chunks,
+    )
+
+    logger.info("  Starting Vertex AI Search import...")
+    op_name = indexer.import_chunks(gcs_chunks_uri, doc_id)
+
+    logger.info("  Waiting for import LRO...")
+    result = indexer.wait_for_import(op_name)
+    if result.errors:
+        for err in result.errors[:5]:
+            logger.warning("  Import error sample: %s", err)
+
+    elapsed = time.time() - t0
+    return {
+        "file": pdf_path.name,
+        "doc_id": doc_id,
+        "n_chunks": n_chunks,
+        "n_metadata_failures": 0,
+        "gcs_pdf_uri": gcs_pdf_uri,
+        "gcs_chunks_uri": gcs_chunks_uri,
+        "import_success": result.success_count,
+        "import_failures": result.failure_count,
+        "elapsed_s": round(elapsed, 1),
+        "resumed_from_upload": True,
+    }
+
+
 def ingest_file(
     pdf_path: Path,
     extractor: PDFExtractor,
@@ -167,10 +236,14 @@ def ingest_file(
     indexer: VertexSearchIndexer,
     strategy: ProcessingStrategy,
     dry_run: bool = False,
+    force: bool = False,
 ) -> dict:
     """Run the full ingestion pipeline for a single PDF.
 
     Steps in order:
+      0. If the chunk JSONL for this doc_id is already uploaded to GCS (and
+         neither --force nor --dry-run), skip straight to step 7 — see
+         _import_existing_chunks(). Otherwise:
       1. Compute doc_id (content hash)
       2. Extract text and structure from the PDF
       3. Chunk the extracted document
@@ -189,7 +262,11 @@ def ingest_file(
         indexer: Initialized VertexSearchIndexer.
         strategy: Chunk-processing strategy (units + context + concurrency).
         dry_run: If True, run through extract/chunk/metadata but skip GCS upload
-                 and Vertex AI import.
+                 and Vertex AI import. Also disables the already-uploaded
+                 short-circuit, since a dry run's whole point is to preview
+                 extraction/chunking/tagging.
+        force: If True, re-run the full pipeline even if this doc_id's chunks
+               are already uploaded to GCS (disables the short-circuit).
 
     Returns:
         Summary dict with keys: file, doc_id, n_chunks, n_metadata_failures,
@@ -200,6 +277,10 @@ def ingest_file(
     # 1. Compute doc_id
     doc_id = uploader.compute_doc_id(pdf_path)
     logger.info("  doc_id: %s...", doc_id[:16])
+
+    # 0. Checkpoint short-circuit: chunks already uploaded, nothing local to redo.
+    if not dry_run and not force and uploader.is_already_uploaded(doc_id):
+        return _import_existing_chunks(pdf_path, doc_id, uploader, indexer, t0)
 
     # 2. Extract
     logger.info("  Extracting text from %s...", pdf_path.name)
@@ -329,7 +410,9 @@ def print_summary(results: list[dict]) -> None:
     total_failures = 0
     for r in results:
         status = "WARN" if r.get("import_failures", 0) > 0 else "OK  "
-        print(f"[{status}] {r['file']}")
+        resumed = "  [resumed from GCS upload — extraction/chunking/tagging skipped]" \
+            if r.get("resumed_from_upload") else ""
+        print(f"[{status}] {r['file']}{resumed}")
         print(f"       doc_id  : {r['doc_id'][:24]}...")
         print(f"       chunks  : {r['n_chunks']}  (metadata failures: {r['n_metadata_failures']})")
         if r["gcs_pdf_uri"]:
@@ -429,6 +512,14 @@ def main() -> None:
             datastore_id=settings.vertex_search_datastore_id,
             api_endpoint=settings.discovery_engine_endpoint,  # regional endpoint (fixes the import crash)
         )
+    except IngestionPromptConfigError as exc:
+        # A real operator mistake in config/ingestion_prompt.yaml, not a Google
+        # API/credential problem — log_api_error's hints wouldn't apply here.
+        logger.error(
+            "config/ingestion_prompt.yaml is invalid — fix it (or delete it to "
+            "use built-in defaults) and re-run:\n%s", exc,
+        )
+        sys.exit(2)
     except Exception as exc:  # noqa: BLE001 — clientinit/credential errors
         log_api_error(logger, exc, "initializing the pipeline clients")
         sys.exit(1)
@@ -448,7 +539,7 @@ def main() -> None:
         try:
             result = ingest_file(
                 pdf_path, extractor, chunker, metadata_gen, uploader, indexer,
-                strategy, dry_run=args.dry_run,
+                strategy, dry_run=args.dry_run, force=args.force,
             )
         except Exception as exc:  # noqa: BLE001 — one bad file/API call shouldn't kill the batch
             log_api_error(logger, exc, f"ingesting {pdf_path.name}")

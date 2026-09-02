@@ -12,6 +12,65 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added
+- **Provider-agnostic LLM client abstraction** (2026-08-31): `ingestion/llm/`
+  (`LLMClient` ABC + `GeminiClient`) now owns every direct `google-genai` call
+  that used to live in `metadata_gen.py` (`_get_client`/`_verify_model_available`/
+  the retry loop). `MetadataGenerator` talks only to `self._llm: LLMClient`, built
+  via `build_llm_client("gemini", ...)`. Swapping in `openai` / `anthropic` /
+  `mistralai` / `openrouter` means writing one new `LLMClient` subclass (see
+  `ingestion/llm/gemini.py` for the shape) and registering it in
+  `ingestion/llm/__init__.py::_PROVIDERS` — no caller changes.
+  - Exceptions are categorized so callers can handle/report each kind
+    differently: `LLMConnectivityError` (transient, safe to retry),
+    `LLMAPIError` (auth/quota/request problem), `LLMGenerationError` (the call
+    succeeded but the model's output wasn't usable JSON — carries `raw_text`),
+    and `LLMModelUnavailableError` (fatal, mirrors the existing
+    `GeminiModelUnavailableError`). `GeminiExtractionError` and
+    `GeminiModelUnavailableError` remain importable from `ingestion.metadata_gen`
+    as aliases for `LLMGenerationError`/`LLMModelUnavailableError`, so existing
+    callers don't need to change.
+- **Malformed-LLM-output logging** (2026-08-31): `ingestion/llm/base.py::log_llm_error()`
+  logs the actual raw text a model produced when `_validate_and_coerce()` rejects
+  it (non-JSON response, or schema-invalid after coercion) — previously this was
+  either dropped entirely (`_call_gemini`'s `JSONDecodeError` path never captured
+  `response.text`) or reduced to a generic Google-error hint with no indication
+  of what the model actually said (`scripts/inspect_chunks.py` calling
+  `log_api_error` on a plain pydantic `ValidationError`). Wired into both
+  `MetadataGenerator.generate()` and `scripts/inspect_chunks.py::_generate_metadata()`.
+- **`config/ingestion_prompt.yaml` validation** (2026-08-31): a MISSING file is
+  still the documented, expected case (falls back to built-in defaults, INFO
+  log). A file that EXISTS but fails to parse, isn't a YAML mapping, or is
+  missing/mistypes a required framing key (`system_preamble`,
+  `output_instruction`, `allowed_values_header`, `closing_instruction`,
+  `guidance`) now raises `IngestionPromptConfigError` and halts
+  `MetadataGenerator` construction, instead of silently tagging the whole
+  corpus against defaults nobody asked for — same fail-fast philosophy as
+  `GeminiModelUnavailableError`. `scripts/batch_ingest.py` and
+  `scripts/inspect_chunks.py` both catch it at startup with an actionable
+  message and exit before any chunk is processed.
+- **Finer-grained ingestion checkpointing** (2026-08-31):
+  - `scripts/batch_ingest.py::ingest_file()` now checks
+    `GCSUploader.is_already_uploaded(doc_id)` *before* extracting/chunking a
+    PDF. If this doc_id's chunk JSONL is already sitting in GCS (and neither
+    `--force` nor `--dry-run` was passed), extraction, chunking, and metadata
+    generation are skipped entirely and the Vertex AI Search import LRO is
+    started directly against the existing object (`_import_existing_chunks()`).
+    This is the resume path for a crash between "chunks uploaded" and "import
+    LRO confirmed" — exactly the gap the LRO bug above could leave a run in,
+    which previously meant re-extracting and re-chunking the whole PDF for
+    nothing.
+  - `scripts/batch_ingest.py::_generate_all_metadata()` now checks whether the
+    per-chunk metadata checkpoint already covers every chunk
+    (`_checkpoint_covers_all()`) before building the strategy's units/thread
+    pool, and short-circuits straight to loading cached metadata if so —
+    previously the checkpoint was only consulted chunk-by-chunk inside an
+    already-spun-up thread pool.
+  - `ingestion/uploader.py`: added `GCSUploader.gcs_pdf_uri()` /
+    `gcs_chunks_uri()` (derive the URI without a network call) and
+    `count_uploaded_chunks()` (line count of an already-uploaded chunks JSONL,
+    for reporting on the short-circuit path).
+
 ### Fixed
 - **`batch_ingest.py` failing LRO calls at the end of metadata generation.
   ** (2026-08-31)
