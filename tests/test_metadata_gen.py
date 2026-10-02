@@ -297,13 +297,28 @@ class TestMalformedOutputCarriesRawText:
 # ---------------------------------------------------------------------------
 
 
+_COMPLETE_PROMPT_YAML = """
+system_preamble: "Custom preamble."
+output_instruction: "Respond only with JSON."
+allowed_values_header: "Allowed values:"
+closing_instruction: "Output valid JSON only."
+guidance:
+  - "- a guidance bullet."
+schema_notes_keys:
+  - domain_vs_modality
+"""
+
+
 class TestPromptConfigValidation:
-    def test_missing_file_falls_back_to_defaults(
+    def test_missing_file_halts_construction(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """There is no Python-side fallback: a missing file is an operator
+        mistake (or a deliberately-removed file) and must halt, exactly like
+        an invalid one — the prompt has exactly one source."""
         monkeypatch.setenv("INGESTION_PROMPT_PATH", str(tmp_path / "does_not_exist.yaml"))
-        gen = MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
-        assert gen._prompt_cfg["system_preamble"].strip()
+        with pytest.raises(IngestionPromptConfigError):
+            MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
 
     def test_invalid_yaml_halts_construction(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -341,13 +356,52 @@ class TestPromptConfigValidation:
         with pytest.raises(IngestionPromptConfigError):
             MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
 
-    def test_valid_override_is_accepted(
+    def test_partial_file_now_halts_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A file that supplies only some required keys used to be merged
+        over Python-side defaults for the rest; there is no longer a second
+        source to merge from, so a partial file is invalid, not "partially
+        overridden defaults"."""
+        partial = tmp_path / "ingestion_prompt.yaml"
+        partial.write_text("system_preamble: 'Custom preamble.'\n")
+        monkeypatch.setenv("INGESTION_PROMPT_PATH", str(partial))
+        with pytest.raises(IngestionPromptConfigError):
+            MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
+
+    def test_complete_override_is_accepted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         good = tmp_path / "ingestion_prompt.yaml"
-        good.write_text("system_preamble: 'Custom preamble.'\n")
+        good.write_text(_COMPLETE_PROMPT_YAML)
         monkeypatch.setenv("INGESTION_PROMPT_PATH", str(good))
         gen = MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
         assert gen._prompt_cfg["system_preamble"] == "Custom preamble."
-        # Unspecified keys keep their built-in defaults.
-        assert gen._prompt_cfg["closing_instruction"]
+        assert gen._prompt_cfg["closing_instruction"] == "Output valid JSON only."
+        assert gen._prompt_cfg["schema_notes_keys"] == ["domain_vs_modality"]
+
+    def test_schema_notes_keys_defaults_to_empty_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """schema_notes_keys is optional — omitting it just means no schema
+        `notes` text is appended to the guidance block, not a validation
+        failure."""
+        good = tmp_path / "ingestion_prompt.yaml"
+        good.write_text(
+            "system_preamble: 'p'\noutput_instruction: 'o'\n"
+            "allowed_values_header: 'a'\nclosing_instruction: 'c'\n"
+        )
+        monkeypatch.setenv("INGESTION_PROMPT_PATH", str(good))
+        gen = MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)
+        assert gen._prompt_cfg["schema_notes_keys"] == []
+
+    def test_non_list_schema_notes_keys_halts_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = tmp_path / "ingestion_prompt.yaml"
+        bad.write_text(
+            _COMPLETE_PROMPT_YAML + "\nschema_notes_keys: 'not_a_list'\n"
+        )
+        monkeypatch.setenv("INGESTION_PROMPT_PATH", str(bad))
+        with pytest.raises(IngestionPromptConfigError):
+            MetadataGenerator(model_name="gemini-1.5-flash", schema_path=_REAL_SCHEMA_PATH)

@@ -13,6 +13,56 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Added
+- **`config/ingestion_prompt.yaml` is now the single, required source of the
+  ingestion prompt** (2026-09-04): removed the hardcoded `_DEFAULT_PROMPT_CFG`
+  fallback dict from `ingestion/metadata_gen.py`. Previously a **missing**
+  file silently fell back to a Python-side copy of (nominally) the same text,
+  which meant the prompt an operator edited in the yaml and the prompt
+  actually used by a run without that file could silently diverge — two
+  sources of truth for one prompt. Now a missing file is treated exactly like
+  an invalid one: `IngestionPromptConfigError` and a halt before any chunk is
+  tagged (same as before for invalid-but-present files). Ship a valid
+  `config/ingestion_prompt.yaml` (already checked into the repo), or point
+  `INGESTION_PROMPT_PATH` at your own complete copy.
+  - `INGESTION_FOR_CLINICIANS.md` and `CLAUDE.md` updated to describe the
+    halt-on-missing behavior; the old "quietly falls back" language was no
+    longer accurate and has been removed everywhere it appeared.
+- **`schema_notes_keys` — prompt-crafting rules made explicit in config, not
+  code** (2026-09-04): which `config/rta_v1.json` `notes` entries get appended
+  to the extraction guidance block (the `directionality`/`applies_when`
+  mutual-exclusivity/pairing rule, and the `domain` vs. `therapeutic_modality`
+  distinction) used to be a tuple hardcoded in
+  `metadata_gen.py::_extraction_guidance()`. It is now a `schema_notes_keys`
+  list in `config/ingestion_prompt.yaml` (optional, defaults to `[]`, validated
+  as a list of strings) — an operator can see and change what schema-tied text
+  augments the prompt without touching Python.
+- **`scripts/show_prompt.py`** (2026-09-04): prints the exact prompt
+  `metadata_gen.py` sends to the LLM — either for a placeholder chunk (no PDF,
+  no cloud calls, useful for checking a prompt edit landed) or for a real
+  chunk of a real PDF via `--pdf ... --chunk-index N` (includes whatever
+  chapter context the active `INGEST_STRATEGY` would attach). `--constants`
+  additionally prints every resolved runtime constant a real run would use:
+  GCP project/location, GCS bucket, Vertex AI Search datastore/engine ID,
+  Gemini model, ingest strategy/concurrency, and the prompt/schema/checkpoint
+  paths — each read defensively so an incomplete `.env` prints `<not set>`
+  per-value instead of crashing the whole command.
+- **Raw LLM response now logged at DEBUG on success, not just failure**
+  (2026-09-04): `ingestion/llm/gemini.py::GeminiClient.generate_json()` logs
+  the exact (truncated) response text for every call. Previously the raw text
+  was only ever surfaced via `LLMGenerationError.raw_text` on a *failed* call
+  (see `log_llm_error()` below); a successful call's exact output was never
+  written anywhere but the post-coercion `ChunkMetadata`. Run any script with
+  `--verbose` to see it (see CLAUDE.md "Seeing exact LLM output").
+- **`determinism.txt`** (2026-09-04): investigates reports of non-reproducible
+  tagging at `temperature=0.0`. Rules out this codebase's own concurrency
+  (`ThreadPoolExecutor` in `batch_ingest.py`) and the `ChapterContextStrategy`
+  chapter-context composition as the cause, with code-level evidence that the
+  exact prompt built for a given chunk is independent of thread scheduling and
+  `INGEST_CONCURRENCY`. Identifies the actual cause as inherent to hosted
+  Gemini API serving (batching/floating-point non-associativity, no `seed`
+  pinned, unpinned model alias) — outside this pipeline's control — and notes
+  the checkpoint files already exist for exactly this reason (a re-run reuses
+  cached tags rather than re-rolling them).
 - **Provider-agnostic LLM client abstraction** (2026-08-31): `ingestion/llm/`
   (`LLMClient` ABC + `GeminiClient`) now owns every direct `google-genai` call
   that used to live in `metadata_gen.py` (`_get_client`/`_verify_model_available`/

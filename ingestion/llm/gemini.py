@@ -10,6 +10,7 @@ see ingestion/llm/__init__.py::build_llm_client.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Optional
 
@@ -19,6 +20,7 @@ from google.genai import types
 from config.settings import settings
 
 from .base import (
+    _MAX_RAW_TEXT_CHARS,
     LLMAPIError,
     LLMClient,
     LLMConnectivityError,
@@ -26,6 +28,8 @@ from .base import (
     LLMGenerationError,
     LLMModelUnavailableError,
 )
+
+logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 2.0  # seconds; doubled each attempt
@@ -41,6 +45,24 @@ _CONNECTIVITY_MARKERS = (
     "TransportError",
     "RetryError",
 )
+
+
+def _log_raw_response(text: str) -> None:
+    """DEBUG-log the exact text Gemini returned for one call, truncated.
+
+    This is the only place the raw response text is visible on the SUCCESS
+    path (log_llm_error in base.py only surfaces raw_text when a call fails).
+    Silent by default (DEBUG); run any script with --verbose
+    (scripts/_gcp_logging.py::setup_logging) to see it — useful for auditing
+    exactly what the model produced even when generation "worked".
+    """
+    preview = text[:_MAX_RAW_TEXT_CHARS]
+    note = (
+        f" (showing first {_MAX_RAW_TEXT_CHARS} of {len(text)} chars)"
+        if len(text) > _MAX_RAW_TEXT_CHARS
+        else ""
+    )
+    logger.debug("Gemini raw response%s:\n%s", note, preview)
 
 
 class GeminiClient(LLMClient):
@@ -112,6 +134,7 @@ class GeminiClient(LLMClient):
                 raise last_exc from exc
             else:
                 text = getattr(response, "text", None) or ""
+                _log_raw_response(text)
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError as exc:

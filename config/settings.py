@@ -241,8 +241,11 @@ class Settings:
         """Path to ingestion_prompt.yaml (hand-authored Gemini extraction framing).
 
         Holds the natural-language scaffolding/guidance for metadata_gen's prompt;
-        the enum vocabulary is generated from the schema, not stored here. Missing
-        or invalid file → metadata_gen uses built-in defaults.
+        the enum vocabulary is generated from the schema, not stored here. This is
+        the SOLE source of that scaffolding — there is no Python-side fallback.
+        A missing or invalid file raises IngestionPromptConfigError and halts
+        MetadataGenerator construction. Point this at your own complete copy via
+        INGESTION_PROMPT_PATH, or use the one checked into the repo.
         """
         return Path(os.environ.get("INGESTION_PROMPT_PATH", "config/ingestion_prompt.yaml"))
 

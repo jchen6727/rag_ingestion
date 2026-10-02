@@ -3,9 +3,13 @@
 **Who this is for:** clinicians (no coding needed). You'll learn how to adjust the
 plain-English instructions the AI follows when it labels ("tags") each passage of
 a document during ingestion.
-**What you'll edit:** one text file — `config/ingestion_prompt.yaml`.
-**You cannot break anything permanently:** if an edit is malformed, the system
-quietly falls back to the built-in instructions and keeps working.
+**What you'll edit:** one text file — `config/ingestion_prompt.yaml`. It is the
+**only** place this text lives — there is no separate built-in copy.
+**You cannot break anything permanently, but a bad edit does stop ingestion:**
+if the file becomes malformed (or you delete it), the system refuses to guess
+and halts with an error telling you what's wrong, rather than silently tagging
+documents against instructions nobody actually reviewed. Fix the file and
+re-run — nothing is lost.
 
 ---
 
@@ -84,23 +88,34 @@ This file is YAML, which is picky about quotes and indentation. Two safeguards:
 
 1. Keep each bullet wrapped in straight double quotes: `- "your text here"`.
    Avoid "smart quotes" from word processors — use a plain text editor.
-2. If the file ever can't be read, the system logs a warning and uses the
-   built-in default instructions, so ingestion never stops. That also means: if
-   your change *seems* to have no effect, the file may have a formatting error —
-   check the run's log for a "Could not load ingestion prompt config" warning.
+2. If the file can't be read (bad YAML, a key deleted, the file itself
+   deleted), ingestion **stops immediately** with an error naming the exact
+   problem, before any document is touched. There is no silent fallback to
+   built-in text to worry about — either your file is what ran, or nothing
+   ran. Fix what the error says and re-run.
 
 ## 6. Seeing the effect of your change (before spending on a full run)
 
-You don't have to run a whole ingestion to check your wording. Ask a developer (or
-follow the README) to run the **preview** on one document:
+You don't have to run a whole ingestion to check your wording. Two ways to check,
+cheapest first:
 
-```
-PYTHONPATH=. python scripts/inspect_chunks.py corpus/<some_file>.pdf --limit 15
-```
+- **See the exact prompt text** (instant, no API calls, no PDF needed):
+  ```
+  PYTHONPATH=. python scripts/show_prompt.py
+  ```
+  This prints precisely what the AI will receive, built from your current
+  `config/ingestion_prompt.yaml` — the fastest way to confirm an edit landed
+  where you expect. Add `--pdf corpus/<file>.pdf --chunk-index 0` to see it
+  filled in with a real passage instead of a placeholder.
 
-That tags the first 15 passages and writes a readable report you can open
-(`ingestion_review/…​.review.md`). Read a few passages and check the tags reflect
-your guidance. Adjust the bullets and re-run until it reads right.
+- **See the resulting tags** on real passages. Ask a developer (or follow the
+  README) to run the **preview** on one document:
+  ```
+  PYTHONPATH=. python scripts/inspect_chunks.py corpus/<some_file>.pdf --limit 15
+  ```
+  That tags the first 15 passages and writes a readable report you can open
+  (`ingestion_review/…​.review.md`). Read a few passages and check the tags
+  reflect your guidance. Adjust the bullets and re-run until it reads right.
 
 ## 7. Where the tags themselves are defined (a heavier, separate change)
 

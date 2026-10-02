@@ -6,12 +6,24 @@
 #      at runtime (`_enum_legend`); never hand-edit it, or it drifts from the schema.
 #   2. the natural-language FRAMING and GUIDANCE — clinical judgement, edited by hand.
 # This file holds part 2 only, so a non-developer can tune the wording without
-# touching Python. If this file is missing/invalid, metadata_gen falls back to the
-# built-in defaults (identical text), so ingestion never breaks on a bad edit.
+# touching Python.
+#
+# THIS IS THE ONLY SOURCE OF THE PROMPT SCAFFOLDING. There is no Python-side
+# fallback: if this file is missing, unparseable, or missing a required key,
+# MetadataGenerator construction raises IngestionPromptConfigError and
+# ingestion halts before any chunk is tagged (see ingestion/metadata_gen.py).
+# A previous version of this code fell back to a hardcoded copy of this text
+# in metadata_gen.py when the file was missing, which meant the prompt an
+# operator edited here and the prompt actually used by a run without this
+# file could silently diverge — that fallback has been removed. To point at a
+# different file, set INGESTION_PROMPT_PATH; do not delete this one.
+#
+# Required keys: system_preamble, output_instruction, allowed_values_header,
+# closing_instruction (non-empty strings), guidance (list of strings, may be
+# empty). schema_notes_keys is optional (defaults to []).
 #
 # Placeholders available: none — keep tokens/enum names OUT of here (they come from
-# the schema). Schema `notes` (domain_vs_modality, directionality_applies_when) are
-# appended automatically after `guidance`.
+# the schema).
 
 # One-line role statement at the top of the prompt.
 system_preamble: >-
@@ -33,3 +45,15 @@ guidance:
 
 # Final instruction after the chunk text.
 closing_instruction: "Output valid JSON only."
+
+# Which config/rta_v1.json `notes` entries get appended to the guidance block
+# above, verbatim, after this file's own `guidance` bullets. These two encode
+# rules that are mutually-exclusive/pairing constraints tied to the schema's
+# own if/then validation (directionality <-> applies_when) rather than free
+# clinical judgement, so their canonical text lives with the schema, not here
+# — this list is what pulls them into the prompt. Add a key only if the
+# matching entry exists in rta_v1.json's `notes`; unknown keys are silently
+# skipped (no matching note = nothing appended).
+schema_notes_keys:
+  - domain_vs_modality
+  - directionality_applies_when

@@ -295,8 +295,10 @@ def main() -> None:
             )
         except IngestionPromptConfigError as exc:
             parser.error(
-                "config/ingestion_prompt.yaml is invalid — fix it (or delete it to "
-                f"use built-in defaults) and re-run:\n{exc}"
+                "config/ingestion_prompt.yaml is missing or invalid — it is the "
+                "sole source of the ingestion prompt (no built-in fallback). Fix "
+                "it (see INGESTION_FOR_CLINICIANS.md) and re-run:\n"
+                f"{exc}"
             )
         logger.info("Metadata schema: %s", settings.metadata_schema_path)
 

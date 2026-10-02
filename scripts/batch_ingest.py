@@ -516,8 +516,9 @@ def main() -> None:
         # A real operator mistake in config/ingestion_prompt.yaml, not a Google
         # API/credential problem — log_api_error's hints wouldn't apply here.
         logger.error(
-            "config/ingestion_prompt.yaml is invalid — fix it (or delete it to "
-            "use built-in defaults) and re-run:\n%s", exc,
+            "config/ingestion_prompt.yaml is missing or invalid — it is the sole "
+            "source of the ingestion prompt (no built-in fallback). Fix it (see "
+            "INGESTION_FOR_CLINICIANS.md) and re-run:\n%s", exc,
         )
         sys.exit(2)
     except Exception as exc:  # noqa: BLE001 — clientinit/credential errors

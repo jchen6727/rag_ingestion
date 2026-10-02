@@ -44,10 +44,20 @@ GeminiModelUnavailableError = LLMModelUnavailableError
 
 
 class IngestionPromptConfigError(Exception):
-    """Raised when config/ingestion_prompt.yaml exists but is malformed or
+    """Raised when config/ingestion_prompt.yaml is missing, malformed, or
     missing required keys. Fatal — propagates out of MetadataGenerator.__init__
-    so ingestion halts before any chunk is tagged against a broken/unintended
-    prompt, rather than silently degrading to built-in defaults."""
+    so ingestion halts before any chunk is tagged, rather than silently
+    reconstructing prompt text from a second, hidden source.
+
+    There is deliberately no Python-side fallback prompt text: the ingestion
+    prompt lives in exactly one place, config/ingestion_prompt.yaml (or
+    whatever INGESTION_PROMPT_PATH points at) — see CLAUDE.md "Prompt
+    config". A prior version of this code fell back to a hardcoded dict in
+    this module when the file was missing, which meant the prompt an operator
+    edited in the yaml and the prompt actually used by a run without that
+    file could silently diverge. Ship a valid config/ingestion_prompt.yaml
+    (already checked into the repo) rather than relying on a fallback.
+    """
 
 
 # The controlled vocabulary (valid domains, doc_types, enums, array fields, and
@@ -95,8 +105,10 @@ class MetadataGenerator:
         # Controlled vocabulary derived from the authoritative schema; drives
         # both prompt construction and response coercion.
         self._vocab = SchemaVocabulary(self._schema)
-        # Hand-authored prompt scaffolding (config/ingestion_prompt.yaml); falls
-        # back to built-in defaults if the file is missing or unreadable.
+        # Hand-authored prompt scaffolding — the SOLE source is
+        # config/ingestion_prompt.yaml (settings.ingestion_prompt_path). No
+        # Python-side fallback: a missing or invalid file raises
+        # IngestionPromptConfigError and halts construction (see that class).
         self._prompt_cfg = self._load_prompt_config()
         # LLM calls are delegated to a provider-agnostic LLMClient (see
         # ingestion/llm/) rather than talking to google-genai directly, so the
@@ -242,42 +254,22 @@ class MetadataGenerator:
     def _extraction_guidance(self) -> str:
         """Return the clinical extraction guidance block for the prompt.
 
-        Base guidance bullets come from ``config/ingestion_prompt.yaml`` (or the
-        built-in defaults); the schema ``notes`` (``domain_vs_modality`` and
-        ``directionality_applies_when``) are appended so the guidance always
-        tracks the active schema.
+        Guidance bullets come entirely from ``config/ingestion_prompt.yaml``'s
+        ``guidance`` list, plus whichever schema ``notes`` keys that same file
+        names in ``schema_notes_keys`` (e.g. ``domain_vs_modality``,
+        ``directionality_applies_when`` — the mutual-exclusivity / pairing
+        rules for directionality vs. applies_when). Which schema notes feed
+        the prompt is therefore explicit, hand-editable config (see
+        ``schema_notes_keys`` in ingestion_prompt.yaml), not a tuple hardcoded
+        in this module.
         """
         notes = self._schema.get("notes", {})
         lines: list[str] = ["Extraction guidance:"]
         lines.extend(self._prompt_cfg.get("guidance", []))
-        for key in ("domain_vs_modality", "directionality_applies_when"):
+        for key in self._prompt_cfg.get("schema_notes_keys", []):
             if notes.get(key):
                 lines.append("- " + notes[key])
         return "\n".join(line for line in lines if str(line).strip())
-
-    # Built-in fallback used when config/ingestion_prompt.yaml is absent/invalid.
-    _DEFAULT_PROMPT_CFG = {
-        "system_preamble": (
-            "You are extracting structured metadata for a psychotherapy guidance "
-            "RAG corpus (CBT/DBT/IPT clinicians; real-time RTA retrieval pipeline)."
-        ),
-        "output_instruction": "Respond ONLY with valid JSON matching this schema (no markdown, no prose):",
-        "allowed_values_header": "Allowed values for controlled fields (use these EXACT tokens):",
-        "guidance": [
-            "- domain is document-level (the source's overall orientation); therapeutic_modality "
-            "is chunk-level (what THIS passage addresses) — they may differ.",
-            "- directionality and applies_when are ONE decision: does the passage say to DO something "
-            "(indicated), AVOID something (contraindicated), or proceed with CAUTION (cautionary), and "
-            "under exactly which events/presentations/patient-states does that apply? If it applies "
-            "whenever the modality is active, return applies_when as an empty list. A contraindicated "
-            "or cautionary passage MUST list at least one applies_when value.",
-            "- clinical_caution and any contraindicated/cautionary directionality are patient-safety "
-            "fields: extract them explicitly and never omit a stated contraindication.",
-            "- session_event_tags here tag what the passage is ABOUT (a retrieval target), NOT a live "
-            "event; 'none' means the passage addresses no specific in-session event.",
-        ],
-        "closing_instruction": "Output valid JSON only.",
-    }
 
     # Keys that must be a non-empty string; enforced by _validate_prompt_config.
     _REQUIRED_PROMPT_STR_KEYS = (
@@ -288,24 +280,29 @@ class MetadataGenerator:
     )
 
     def _load_prompt_config(self) -> dict:
-        """Load config/ingestion_prompt.yaml, merged over the built-in defaults.
+        """Load config/ingestion_prompt.yaml — the single source of the
+        hand-authored prompt scaffolding (see IngestionPromptConfigError).
 
-        A MISSING file is the documented, expected case (see the file's own
-        header comment) — it falls back to ``_DEFAULT_PROMPT_CFG`` with an INFO
-        log, same as before. A file that EXISTS but fails to parse, isn't a
-        mapping, or is missing/mistypes required keys is an operator mistake:
-        this now raises and halts construction instead of silently tagging the
-        whole corpus with defaults nobody asked for — the same fail-fast
-        philosophy as GeminiModelUnavailableError for a bad Gemini model.
+        Both a MISSING file and a file that EXISTS but fails to parse, isn't a
+        mapping, or is missing/mistypes required keys are operator-fixable
+        mistakes: both now raise and halt construction instead of either
+        silently tagging the whole corpus against defaults nobody asked for,
+        or reconstructing the prompt from a second, hidden Python source —
+        the same fail-fast philosophy as GeminiModelUnavailableError for a
+        bad Gemini model.
 
         Raises:
-            IngestionPromptConfigError: If the file exists but is invalid.
+            IngestionPromptConfigError: If the file is missing or invalid.
         """
-        cfg = dict(self._DEFAULT_PROMPT_CFG)
         path = settings.ingestion_prompt_path
         if not path.exists():
-            logger.info("No ingestion prompt config at %s; using built-in defaults.", path)
-            return cfg
+            raise IngestionPromptConfigError(
+                f"{path} does not exist. This file is the required, single "
+                f"source of the ingestion prompt scaffolding — there is no "
+                f"built-in fallback. Use the copy checked into the repo at "
+                f"config/ingestion_prompt.yaml, or point INGESTION_PROMPT_PATH "
+                f"at your own complete copy (see INGESTION_FOR_CLINICIANS.md)."
+            )
 
         import yaml  # local import: metadata_gen has no hard yaml dependency otherwise
 
@@ -321,16 +318,19 @@ class MetadataGenerator:
                 f"{type(loaded).__name__}."
             )
 
-        cfg.update({k: v for k, v in loaded.items() if v is not None})
+        cfg = dict(loaded)
+        cfg.setdefault("guidance", [])
+        cfg.setdefault("schema_notes_keys", [])
         self._validate_prompt_config(cfg, path)
         return cfg
 
     def _validate_prompt_config(self, cfg: dict, path: Path) -> None:
-        """Validate the shape of a loaded ingestion_prompt.yaml (post-merge).
+        """Validate the shape of a loaded ingestion_prompt.yaml.
 
         Checks the fields ``_build_extraction_prompt`` / ``_extraction_guidance``
         actually depend on: the four scalar framing strings must be non-empty
-        strings, and ``guidance`` (if present) must be a list of strings.
+        strings, and ``guidance`` / ``schema_notes_keys`` (if present) must be
+        lists of strings.
 
         Raises:
             IngestionPromptConfigError: Listing every problem found, so an
@@ -345,6 +345,12 @@ class MetadataGenerator:
         guidance = cfg.get("guidance", [])
         if not isinstance(guidance, list) or not all(isinstance(g, str) for g in guidance):
             problems.append("'guidance' must be a list of strings")
+
+        schema_notes_keys = cfg.get("schema_notes_keys", [])
+        if not isinstance(schema_notes_keys, list) or not all(
+            isinstance(k, str) for k in schema_notes_keys
+        ):
+            problems.append("'schema_notes_keys' must be a list of strings")
 
         if problems:
             raise IngestionPromptConfigError(
