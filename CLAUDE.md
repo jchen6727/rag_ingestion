@@ -139,15 +139,29 @@ with `INGEST_STRATEGY` / `INGEST_CONCURRENCY`.
   batching/floating-point non-determinism in the hosted Gemini API, outside
   this pipeline's control).
 
-## Metadata review scripts (operate on an exported chunks `.jsonl`)
+## Metadata review scripts (operate on a chunks `.jsonl`)
 
-These read the `structData`-format JSONL that ingestion uploads to GCS (download
-with `gcloud storage cp gs://<bucket>/chunks/<doc_id>.jsonl`), not the local
-`inspect_chunks` review file:
-
-- `scripts/view_chunks.py` — filter chunks by tag, print decoded text.
 - `scripts/metadata_viz.py` — tag-frequency charts (plotly → HTML).
 - `scripts/metadata_jaccard.py` — within-field tag co-occurrence (Jaccard heatmap).
+- `scripts/view_chunks.py` — filter chunks by tag, print decoded **text**.
+
+`metadata_viz.py` and `metadata_jaccard.py` only need the flat tag dict, so
+both auto-detect, per line, which of two shapes they were handed — no
+conversion step needed:
+  - the `structData`-format JSONL ingestion uploads to GCS (download with
+    `gcloud storage cp gs://<bucket>/chunks/<doc_id>.jsonl`): `{"id": ...,
+    "structData": {...tags...}}`;
+  - the local, pre-upload JSONL you already have right after ingestion: either
+    `ingestion_checkpoints/<doc_id>.jsonl` (batch_ingest.py's checkpoint) or
+    `inspect_chunks.py`'s `<name>.<docid8>.chunks.jsonl` review file — both
+    shaped as `{"chunk_id": ..., "metadata": {...tags...}}`.
+  A line matching neither shape raises a clear error naming the keys it did
+  find, rather than a bare `KeyError`.
+
+`view_chunks.py` is the one exception: it also needs each chunk's decoded
+**text**, which is only present in the uploaded format (`content.rawBytes`,
+base64) — the local checkpoint/review formats don't carry chunk text at all
+(by design, to stay small), so it still requires the GCS-uploaded JSONL.
 
 ## Gotchas
 

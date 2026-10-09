@@ -12,6 +12,21 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed
+- **`metadata_viz.py` / `metadata_jaccard.py` crashed (`KeyError: 'structData'`)
+  on the local, pre-upload chunks `.jsonl`** (2026-10-02): both scripts
+  unconditionally read `json.loads(line)["structData"]`, a key that only
+  exists in the format `ingestion/uploader.py` writes to GCS. Running either
+  script against `ingestion_checkpoints/<doc_id>.jsonl` (or
+  `inspect_chunks.py`'s `*.chunks.jsonl` review file) — both shaped as
+  `{"chunk_id": ..., "metadata": {...}}` — raised immediately, before a
+  document was ever uploaded. Both scripts now auto-detect, per line, which
+  of the two shapes they were handed (`structData` vs. `metadata`) with no
+  need to pre-convert the file; an unrecognized shape raises a clear error
+  naming the keys actually found instead of a bare `KeyError`. `view_chunks.py`
+  is unchanged — it also needs each chunk's decoded text, which only exists
+  in the GCS-uploaded format, so it still requires that format specifically.
+
 ### Added
 - **`config/ingestion_prompt.yaml` is now the single, required source of the
   ingestion prompt** (2026-09-04): removed the hardcoded `_DEFAULT_PROMPT_CFG`

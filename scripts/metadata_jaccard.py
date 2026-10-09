@@ -10,6 +10,15 @@ between the sets of chunks each value appears on:
 Scalar (non-list) fields will always show 0 off-diagonal, since a chunk can
 only hold one value — this correctly reflects mutual exclusivity.
 
+Accepts two input formats, auto-detected per line (no need to pre-convert):
+  - the GCS-uploaded chunks .jsonl ({"id": ..., "structData": {...tags...}}),
+    produced by ingestion/uploader.py once a doc has actually been uploaded.
+  - the local, pre-upload .jsonl written by scripts/batch_ingest.py's
+    checkpoint (ingestion_checkpoints/<doc_id>.jsonl, or a renamed copy of
+    one) or by scripts/inspect_chunks.py's review .jsonl — both shaped as
+    {"chunk_id": ..., "metadata": {...tags...}}. This is what you have
+    immediately after ingestion/dry-run, before (or without ever) uploading.
+
 Usage:
     conda run -n rag python metadata_jaccard.py boswell_chunks.jsonl
     conda run -n rag python metadata_jaccard.py boswell_chunks.jsonl --fields domain doc_type
@@ -34,14 +43,35 @@ DEFAULT_FIELDS = [
 PLACEHOLDER_VALUES = {"", "none", "not_specified"}
 
 
+def _extract_tags(obj: dict, path: Path, line_no: int) -> dict | None:
+    """Pull the flat tag dict out of one parsed .jsonl line, regardless of
+    which of the two shapes described in the module docstring it is.
+
+    Returns None for a line that is a recognized shape but carries no tags
+    (e.g. a checkpoint entry written before Gemini extraction completed) —
+    callers should skip those rather than treat them as malformed.
+    """
+    if "structData" in obj:
+        return obj["structData"]
+    if "metadata" in obj:
+        return obj["metadata"]  # may be None; caller skips
+    raise ValueError(
+        f"{path} line {line_no}: recognized neither the GCS-upload format "
+        f"(expected an 'structData' key) nor the local checkpoint/review "
+        f"format (expected a 'metadata' key). Got keys: {sorted(obj.keys())}"
+    )
+
+
 def load_records(path: Path) -> list[dict]:
     records = []
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
+        for line_no, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            records.append(json.loads(line)["structData"])
+            tags = _extract_tags(json.loads(line), path, line_no)
+            if tags is not None:
+                records.append(tags)
     return records
 
 
