@@ -12,6 +12,32 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added
+- **`scripts/compare_jsonl.py`** (2026-10-16): diffs two chunks `.jsonl` files
+  by `chunk_id` and flags every tag that differs for the same passage (e.g.
+  re-tagging the same PDF at temperature=0 across two runs — see
+  `determinism.txt` — or checking whether a prompt/schema/model change
+  between two commits shifted tags; `chunk_archive/NOTES.md` has this repo's
+  `run_000N.jsonl` <-> source-PDF naming). Accepts the same dual input format
+  as `metadata_viz.py`/`metadata_jaccard.py` (GCS-uploaded `structData` or the
+  local checkpoint/review `metadata` shape — the two inputs may even differ
+  from each other) and never modifies either input file. Writes
+  `diff_<label1>_<label2>[_fields-...].log` (summary counts, chunk_ids present
+  in only one file, a mismatch-count-by-field table, then every per-chunk
+  field diff) and the matching `.html` (plotly grouped-bar chart of each
+  tag's frequency in file1 vs. file2, sorted by `|difference|`, top N) next to
+  `file1` by default (`--out-dir` to redirect, `--label1`/`--label2` to avoid
+  a filename collision when both inputs share a stem). Any number of trailing
+  positional field names (e.g. `applies_when session_event_tags
+  clinical_presentation`) restricts both the diff and the chart to just those
+  fields and is reflected in the output filename; a requested field not found
+  in either file logs a warning rather than silently producing an
+  all-clear-looking empty diff. Provenance fields (`doc_id`, `source_file`,
+  `page_start`, `page_end`, `chunk_index`) are always excluded since they're
+  copied from the `Chunk`, never produced by the LLM, so a difference there
+  would only ever
+  mean the two chunk_ids aren't the same passage.
+
 ### Fixed
 - **`metadata_viz.py` / `metadata_jaccard.py` crashed (`KeyError: 'structData'`)
   on the local, pre-upload chunks `.jsonl`** (2026-10-02): both scripts

@@ -144,6 +144,20 @@ with `INGEST_STRATEGY` / `INGEST_CONCURRENCY`.
 - `scripts/metadata_viz.py` — tag-frequency charts (plotly → HTML).
 - `scripts/metadata_jaccard.py` — within-field tag co-occurrence (Jaccard heatmap).
 - `scripts/view_chunks.py` — filter chunks by tag, print decoded **text**.
+- `scripts/compare_jsonl.py` — diff two chunks `.jsonl` (e.g. two runs of the
+  same PDF across commits, or two independent ingestions of the same PDF —
+  see `determinism.txt`) by `chunk_id`, flagging any tag that differs for the
+  same passage. Trailing positional args restrict both the diff and the
+  chart to specific fields, e.g. `compare_jsonl.py a.jsonl b.jsonl
+  applies_when session_event_tags clinical_presentation`; a requested field
+  name not found in either file logs a warning (silently zero-diffing an
+  unknown field would otherwise look identical to "no mismatches"). Writes
+  `diff_<label1>_<label2>[_fields-...].log` (per-chunk diffs + a
+  mismatch-count-by-field table) and the matching `.html` (plotly: per-tag
+  frequency in file1 vs. file2, sorted by `|difference|`) next to `file1` —
+  neither input `.jsonl` is modified. Provenance fields (`doc_id`,
+  `source_file`, `page_start`, `page_end`, `chunk_index`) are always excluded
+  since they're copied from the `Chunk`, not produced by the LLM.
 
 `metadata_viz.py` and `metadata_jaccard.py` only need the flat tag dict, so
 both auto-detect, per line, which of two shapes they were handed — no
