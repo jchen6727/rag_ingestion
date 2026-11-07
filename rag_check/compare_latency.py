@@ -42,6 +42,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -135,6 +136,73 @@ def run_arm(
         "usage": result.usage,
         "answer_text": result.text,
     }
+
+
+def run_comparison(
+    prompt: str,
+    *,
+    search_query: Optional[str] = None,
+    tag_pairs: Optional[list[tuple[str, str]]] = None,
+    top_k: int = 10,
+    max_corpus_chunks: Optional[int] = None,
+    skip_filtered: bool = False,
+    skip_full_corpus: bool = False,
+    genai_params: GenAIParams,
+) -> list[dict]:
+    """Run one or both latency-comparison arms and return their result records.
+
+    This is the reusable core behind both the single-run CLI (main(), below)
+    and rag_check/param_sweep.py's per-row sweep — both just assemble inputs
+    and hand them here, so a sweep run and a one-off CLI run can never drift
+    apart in what they actually measure.
+
+    Args:
+        prompt: The question sent to the LLM (both arms).
+        search_query: Search text for the filtered arm's ranking; defaults
+            to `prompt`.
+        tag_pairs: (field, value) pairs for the filtered arm's metadata
+            filter — see retrieval.build_filter_expression(). Empty/None
+            means an unfiltered-but-ranked search.
+        top_k: Max chunks the filtered arm retrieves.
+        max_corpus_chunks: Cap on chunks the full_corpus arm retrieves
+            (None = no cap).
+        skip_filtered / skip_full_corpus: Run only one arm. Not both True.
+        genai_params: Model/sampling/thinking configuration, shared by
+            whichever arm(s) run.
+
+    Returns:
+        A list with one result dict per arm actually run (see run_arm()).
+
+    Raises:
+        ValueError: If both skip flags are True.
+        retrieval.FilterFieldError: If a tag_pairs field name isn't a known
+            filterable field.
+        Whatever the underlying Discovery Engine / genai calls raise.
+    """
+    if skip_filtered and skip_full_corpus:
+        raise ValueError("skip_filtered and skip_full_corpus cannot both be set "
+                          "(nothing left to run).")
+
+    tag_pairs = tag_pairs or []
+    filter_expr = build_filter_expression(tag_pairs)
+    resolved_query = search_query or prompt
+
+    records: list[dict] = []
+    if not skip_filtered:
+        records.append(run_arm(
+            "filtered",
+            lambda: search_filtered(resolved_query, filter_expr, top_k),
+            prompt,
+            genai_params,
+        ))
+    if not skip_full_corpus:
+        records.append(run_arm(
+            "full_corpus",
+            lambda: list_all_chunks(max_corpus_chunks),
+            prompt,
+            genai_params,
+        ))
+    return records
 
 
 def print_summary(records: list[dict]) -> None:
@@ -242,23 +310,17 @@ def main() -> None:
         args.seed, args.max_output_tokens, args.thinking_budget,
     )
 
-    records: list[dict] = []
-
     try:
-        if not args.skip_filtered:
-            records.append(run_arm(
-                "filtered",
-                lambda: search_filtered(search_query, filter_expr, args.top_k),
-                args.prompt,
-                genai_params,
-            ))
-        if not args.skip_full_corpus:
-            records.append(run_arm(
-                "full_corpus",
-                lambda: list_all_chunks(args.max_corpus_chunks),
-                args.prompt,
-                genai_params,
-            ))
+        records = run_comparison(
+            args.prompt,
+            search_query=search_query,
+            tag_pairs=tag_pairs,
+            top_k=args.top_k,
+            max_corpus_chunks=args.max_corpus_chunks,
+            skip_filtered=args.skip_filtered,
+            skip_full_corpus=args.skip_full_corpus,
+            genai_params=genai_params,
+        )
     except Exception as exc:  # noqa: BLE001 — surface any API/SDK error clearly
         log_api_error(logger, exc, "running the latency comparison")
         sys.exit(1)

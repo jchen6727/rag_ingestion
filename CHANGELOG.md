@@ -13,6 +13,68 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Added
+- **`rag_check/` — RAG latency comparison + parameter sweep harness**
+  (2026-11-06): a separate, narrow measurement tool, explicitly **not** part
+  of this package's ingestion/tagging/visualization scope (see "What this
+  is") — it reads from a DataStore already provisioned/populated by
+  `scripts/setup_vertex_search.py` / `scripts/batch_ingest.py` and does not
+  write to it or import from `ingestion/`. Full usage in `rag_check/README.md`.
+  - **`compare_latency.py`**: times one LLM call under two retrieval
+    strategies against the same prompt and the same Gemini request
+    parameters — `filtered` (Discovery Engine `Search`, ranked, optionally
+    restricted by one or more `--tag field=value` metadata filters) vs.
+    `full_corpus` (`ListDocuments`, every chunk, unranked and unfiltered).
+    Retrieval time and generation time are measured separately. Accepts the
+    prompt, the retrieval tag/filter (including an "all documents" mode —
+    simply omit `--tag`), and the full set of relevant `genai` request
+    knobs: `--model`, `--temperature`, `--top-p`, `--sampling-top-k`,
+    `--seed`, `--max-output-tokens`, `--thinking-budget`. Its core,
+    `run_comparison()`, is the single implementation both this CLI and
+    `param_sweep.py` call, so a sweep row can't measure something subtly
+    different from what the one-off CLI would for the same inputs.
+  - **`retrieval.py`**: `build_filter_expression()` builds the Discovery
+    Engine filter string for `--tag`, validating every field name against
+    the schema's actually-registered filterable fields
+    (`config/rta_v1.json` `notes.vertex_ai_search`) rather than letting an
+    unregistered/misspelled field silently no-op the filter at the API
+    layer. Confirmed against a live DataStore while building this: Discovery
+    Engine rejects `=`/`<`/`>` comparison operators on **every** text-indexed
+    field, scalar included — not just arrays (`directionality = "x"` fails
+    with "Unsupported field ... on comparison operators"). Every text field
+    (scalar or array) therefore uses `field: ANY("value")`; only the one
+    true integer field, `year_published`, uses `=`. Also confirmed live:
+    `SearchService.search()` does not return `Document.content` inline in
+    this project even though the DataStore has
+    `content_config=CONTENT_REQUIRED` — only `ListDocuments`/`GetDocument`
+    do — so `search_filtered()` always falls back to a per-chunk
+    `GetDocument` call for chunk text, meaning the `filtered` arm's
+    retrieval cost is `1 + top_k` Discovery Engine round trips, not 1 (this
+    is real, reported latency, not a bug). The decode helper only logs a
+    warning if that fallback *also* comes back empty, to avoid a
+    false-alarm warning on the now-expected missing-inline-content case.
+  - **`llm_query.py`**: calls `google.genai` directly rather than going
+    through `ingestion/llm/`'s `LLMClient` — that abstraction's one method,
+    `generate_json()`, is scoped to always force JSON output for
+    `ChunkMetadata` and has no `seed`/`thinking_budget`/`top_p`/`top_k`/
+    `max_output_tokens` knobs. Its single `generate_content` call also has
+    no retry/backoff (unlike `ingestion/llm/gemini.py`), since a retry would
+    corrupt the latency measurement this tool exists to produce.
+  - **`param_sweep.py`**: runs `compare_latency.run_comparison()` once per
+    row of an input table — `run_sweep_from_csv(csv_path, out_csv=...)` for
+    a CSV file, or `run_sweep(df, out_csv=...)` as the method wrapper for a
+    DataFrame built programmatically (e.g. `itertools.product` over a
+    parameter grid). Every argument is an optional column; a column absent
+    from the table, or blank/NaN for a given row, falls back to
+    `compare_latency.py`'s own default for that argument — only `prompt` is
+    required. Output is long-format (one row per input row × arm actually
+    run for that row), every input column echoed back under an `input_`
+    prefix alongside the measured latency/token/answer outputs; a row whose
+    run raises an exception gets `arm="error"` with the message instead of
+    halting the whole sweep. `rag_check/examples/sweep_example.csv` and
+    `rag_check/examples/dataframe_sweep_example.py` are worked examples of
+    each entry point.
+
+### Added
 - **`scripts/compare_jsonl.py`** (2026-10-16): diffs two chunks `.jsonl` files
   by `chunk_id` and flags every tag that differs for the same passage (e.g.
   re-tagging the same PDF at temperature=0 across two runs — see

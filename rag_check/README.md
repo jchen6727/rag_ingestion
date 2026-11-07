@@ -103,14 +103,17 @@ Must match a field registered as filterable in
 raises a clear error from `rag_check/retrieval.py::build_filter_expression`
 instead of silently building a filter that no-ops at the API layer:
 
-- **Array fields** (use `--tag field=single_value`; each chunk matches if
-  the array *contains* that value): `therapeutic_modality`,
-  `clinical_presentation`, `session_event_tags`, `applies_when`,
-  `risk_dimension_tags`, `patient_population`, `clinical_measure_tags`,
-  `technique_tags`, `clinical_caution`.
-- **Scalar fields**: `domain`, `doc_type`, `session_phase`,
-  `directionality`, `source_file`, `title`, `chapter`, `year_published`,
-  `subdomain`.
+- **Text fields** — scalar or array, same `field: ANY("value")` operator;
+  for arrays a chunk matches if it *contains* that value (confirmed against
+  a live DataStore: Discovery Engine rejects `=`/`<`/`>` on any
+  text-indexed field, scalar included — e.g. `directionality = "x"` fails
+  with "Unsupported field ... on comparison operators"):
+  `therapeutic_modality`, `clinical_presentation`, `session_event_tags`,
+  `applies_when`, `risk_dimension_tags`, `patient_population`,
+  `clinical_measure_tags`, `technique_tags`, `clinical_caution` (arrays);
+  `domain`, `doc_type`, `session_phase`, `directionality`, `source_file`,
+  `title`, `chapter`, `subdomain` (scalars).
+- **Integer field** (the one exception — uses `=`, unquoted): `year_published`.
 
 Multiple `--tag` args are AND-combined. There is currently no CLI way to
 express OR across fields or multiple values for the same array field in one
@@ -137,6 +140,113 @@ With `--out`, the same run is written as JSON with the full answer text,
 every retrieved `chunk_id`, the resolved filter expression, and every
 `genai` param used — enough to reproduce or diff two runs later.
 
+## Parameter sweeps (`param_sweep.py`)
+
+`rag_check/param_sweep.py` runs the same filtered-vs-full-corpus comparison
+once per row of an input table, instead of once per CLI invocation. Both
+entry points call the exact same `compare_latency.run_comparison()` the CLI
+does, so a sweep row can't drift from what a one-off `compare_latency.py`
+run would measure for the same inputs:
+
+- `run_sweep_from_csv(csv_path, out_csv=...)` — CLI / file-based.
+- `run_sweep(df, out_csv=...)` — the method wrapper for a DataFrame you
+  built programmatically instead of a file.
+
+A column is entirely optional: if it's absent from the table, or blank/NaN
+for a given row, that argument falls back to the same default
+`compare_latency.py`'s CLI uses. Only `prompt` is required.
+
+| Column | Maps to | Default if missing/blank |
+|---|---|---|
+| `prompt` | `--prompt` | *(required, no default)* |
+| `search_query` | `--search-query` | `prompt` |
+| `tags` | `--tag` (repeated) | none — see below |
+| `top_k` | `--top-k` | `10` |
+| `max_corpus_chunks` | `--max-corpus-chunks` | no cap |
+| `skip_filtered` | `--skip-filtered` | `False` |
+| `skip_full_corpus` | `--skip-full-corpus` | `False` |
+| `model` | `--model` | `settings.gemini_model_generation` |
+| `temperature` | `--temperature` | `0.0` |
+| `top_p` | `--top-p` | model default |
+| `sampling_top_k` | `--sampling-top-k` | model default |
+| `seed` | `--seed` | unseeded |
+| `max_output_tokens` | `--max-output-tokens` | model default |
+| `thinking_budget` | `--thinking-budget` | model default |
+
+`tags` is a single semicolon-delimited cell (a CSV row can't repeat a
+column the way `--tag` is repeatable on the CLI): e.g.
+`"session_event_tags=disclosure_SI;directionality=contraindicated"` for an
+AND-combined filter, or leave the cell blank for an unfiltered-but-ranked
+search. Bool-ish columns accept `true`/`false`/`1`/`0`/`yes`/`no`.
+
+Output is **long format**: one row per (input row × arm actually run for
+that row) — so a row with neither skip flag set produces two output rows
+(`filtered` and `full_corpus`), each with every input column echoed back
+under an `input_` prefix plus `arm`, `num_chunks`, `prompt_chars`,
+`retrieval_latency_seconds`, `generation_latency_seconds`,
+`total_latency_seconds`, token-usage columns, `chunk_ids`, and
+`answer_text`. A row whose run raises an exception (e.g. an unregistered
+`--tag` field) gets one output row with `arm="error"` and the exception
+message in `error`, instead of halting the whole sweep.
+
+### Example 1 — input CSV
+
+`rag_check/examples/sweep_example.csv`:
+
+```csv
+prompt,tags,top_k,model,temperature,seed
+"What should I do about a client disclosing suicidal ideation mid-session?",session_event_tags=disclosure_SI,5,gemini-2.5-flash,0.0,42
+"What should I do about a client disclosing suicidal ideation mid-session?",session_event_tags=disclosure_SI,10,gemini-2.5-flash,0.0,42
+"How do I handle a therapeutic alliance rupture?",session_event_tags=rupture;directionality=indicated,5,gemini-2.5-flash,0.0,42
+"What DBT skills help with emotional dysregulation?",therapeutic_modality=DBT,10,gemini-2.5-pro,0.0,42
+"What DBT skills help with emotional dysregulation?",,10,gemini-2.5-pro,0.0,42
+```
+
+Note row 5's blank `tags` cell (falls back to an unfiltered ranked
+search) and that `search_query`/`max_corpus_chunks`/`skip_*`/`top_p`/etc.
+are omitted entirely as columns — every one resorts to its default.
+
+```bash
+PYTHONPATH=. python rag_check/param_sweep.py \
+    --input-csv rag_check/examples/sweep_example.csv \
+    --out sweep_results.csv
+```
+
+### Example 2 — generated DataFrame
+
+`rag_check/examples/dataframe_sweep_example.py` builds a `top_k x
+thinking_budget` grid with `itertools.product` — the kind of sweep a CSV is
+awkward for, since you'd otherwise hand-write every combination as a row —
+and passes the DataFrame straight to `run_sweep()`:
+
+```python
+import itertools
+import pandas as pd
+from rag_check.param_sweep import run_sweep
+
+rows = [
+    {
+        "prompt": "What should I do about a client disclosing suicidal ideation mid-session?",
+        "tags": "session_event_tags=disclosure_SI",
+        "top_k": top_k,
+        "thinking_budget": thinking_budget,
+        "model": "gemini-2.5-flash",
+        "seed": 42,
+        "skip_full_corpus": True,  # isolate the filtered arm for this grid
+    }
+    for top_k, thinking_budget in itertools.product([3, 10], [0, 2048])
+]
+sweep_df = pd.DataFrame(rows)
+
+results = run_sweep(sweep_df, out_csv="dataframe_sweep_results.csv")
+```
+
+Run it directly:
+
+```bash
+PYTHONPATH=. python rag_check/examples/dataframe_sweep_example.py
+```
+
 ## Design notes for maintainers
 
 - **Why not reuse `ingestion/llm/` (`LLMClient`)?** That abstraction
@@ -151,16 +261,20 @@ every retrieved `chunk_id`, the resolved filter expression, and every
   single `generate_content` call also intentionally has **no retry/backoff**
   (unlike `ingestion/llm/gemini.py`) — a retry would corrupt the exact
   latency measurement this tool exists to produce.
-- **Chunk text retrieval**: `search_filtered()` reads the `Document` proto
-  inline on each `SearchResult` first (one Discovery Engine call, not two)
-  — the DataStore is provisioned with `content_config=CONTENT_REQUIRED`
-  (`scripts/setup_vertex_search.py::create_datastore`), so `content.rawBytes`
-  is expected to come back the same way `scripts/review_datastore.py`
-  already reads it off `ListDocuments`. If a particular result comes back
-  without inline content (API behavior here has changed across Discovery
-  Engine API versions — don't assume it), it falls back to a per-chunk
-  `DocumentService.get_document()` call rather than silently dropping that
-  chunk from the context.
+- **Chunk text retrieval**: confirmed against a live DataStore,
+  `SearchService.search()` does **not** return the `Document.content`
+  field inline on its results in this project, even though the DataStore
+  is provisioned with `content_config=CONTENT_REQUIRED`
+  (`scripts/setup_vertex_search.py::create_datastore`) — only
+  `ListDocuments`/`GetDocument` return it (the same field
+  `scripts/review_datastore.py` reads). So `search_filtered()`'s
+  per-chunk `DocumentService.get_document()` fallback is the **normal**
+  path here, not a rare edge case: retrieval for the `filtered` arm costs
+  `1 + top_k` Discovery Engine round trips, not 1 — real latency, baked
+  into `retrieval_latency_seconds`, not a bug. (The first decode attempt on
+  the bare search result stays silent about missing content for exactly
+  this reason; a warning only fires if the `get_document` fallback also
+  comes back empty, which would indicate a genuinely missing chunk.)
 - **Region routing**: Discovery Engine calls (`search_filtered`,
   `list_all_chunks`) go through `settings.discovery_engine_location` /
   `discovery_engine_endpoint`; the Gemini call (`llm_query.run_query`) uses

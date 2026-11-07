@@ -77,8 +77,12 @@ def build_filter_expression(tag_filters: list[tuple[str, str]]) -> str:
     """Build a Discovery Engine filter string from (field, value) pairs.
 
     AND-combines all pairs. Array-typed fields (ARRAY_FIELDS) use
-    `field: ANY("value")`; scalar string fields use `field = "value"`; the one
-    scalar integer field in practice (year_published) is emitted unquoted.
+    `field: ANY("value")`. Discovery Engine rejects `=`/`<`/`>` comparison
+    operators on any text-indexed field, scalar or array (confirmed against
+    a live DataStore: `directionality = "x"` fails with "Unsupported field
+    ... on comparison operators" even though `directionality` is a scalar)
+    — `=` is only valid on the one integer scalar field, `year_published`,
+    which is emitted unquoted.
 
     Args:
         tag_filters: List of (field, value) pairs, e.g.
@@ -95,13 +99,10 @@ def build_filter_expression(tag_filters: list[tuple[str, str]]) -> str:
     for raw_field, raw_value in tag_filters:
         field_name = raw_field.strip()
         value = raw_value.strip()
-        if field_name in ARRAY_FIELDS:
+        if field_name in _INTEGER_FIELDS:
+            clauses.append(f"{field_name} = {int(value)}")
+        elif field_name in ARRAY_FIELDS or field_name in SCALAR_FIELDS:
             clauses.append(f'{field_name}: ANY("{value}")')
-        elif field_name in SCALAR_FIELDS:
-            if field_name in _INTEGER_FIELDS:
-                clauses.append(f"{field_name} = {int(value)}")
-            else:
-                clauses.append(f'{field_name} = "{value}"')
         else:
             known = sorted(ARRAY_FIELDS | SCALAR_FIELDS)
             raise FilterFieldError(

@@ -7,7 +7,10 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 `rag_ingestion` ingests clinical PDFs into a tagged, searchable corpus and provides
 tools to review the tags. Scope is **ingestion + metadata tagging + metadata
 visualization only** — the query/retrieval/generation side of the original
-research project is intentionally **not** part of this package.
+research project is intentionally **not** part of this package. The one
+exception is `rag_check/`, a separate, narrow latency-measurement harness
+that reads from an already-provisioned DataStore without extending this
+package's retrieval/generation surface — see "rag_check/" below.
 
 Pipeline: `corpus/*.pdf → extractor → chunker → metadata_gen (Gemini) → uploader
 (GCS) → indexer (Vertex AI Search)`, orchestrated by `scripts/batch_ingest.py`.
@@ -176,6 +179,48 @@ conversion step needed:
 **text**, which is only present in the uploaded format (`content.rawBytes`,
 base64) — the local checkpoint/review formats don't carry chunk text at all
 (by design, to stay small), so it still requires the GCS-uploaded JSONL.
+
+## `rag_check/` (RAG latency measurement — separate from ingestion scope)
+
+A narrow measurement harness that reads from a DataStore already provisioned
+(`scripts/setup_vertex_search.py`) and populated (`scripts/batch_ingest.py`);
+it does not write to the DataStore and does not import from `ingestion/`.
+Full usage, column reference, and worked examples in `rag_check/README.md`.
+
+```bash
+PYTHONPATH=. python rag_check/compare_latency.py --prompt "..." --tag session_event_tags=disclosure_SI
+PYTHONPATH=. python rag_check/param_sweep.py --input-csv rag_check/examples/sweep_example.csv --out results.csv
+```
+
+- **`compare_latency.py`** times one LLM call under two retrieval
+  strategies against the same prompt/model params: `filtered` (Discovery
+  Engine `Search`, ranked, optional `--tag field=value` metadata filter —
+  omit `--tag` entirely for "retrieve/rank across all documents") vs.
+  `full_corpus` (`ListDocuments`, every chunk, unranked/unfiltered).
+  Accepts the prompt, the retrieval tag, and the relevant `genai` request
+  knobs (`--model`, `--temperature`, `--top-p`, `--sampling-top-k`,
+  `--seed`, `--max-output-tokens`, `--thinking-budget`). `run_comparison()`
+  is the one implementation both this CLI and `param_sweep.py` call.
+- **`retrieval.py`** — `build_filter_expression()`: Discovery Engine
+  rejects `=`/`<`/`>` on every text-indexed field, scalar included
+  (confirmed live: `directionality = "x"` fails with "Unsupported field
+  ... on comparison operators") — every text field (scalar or array) uses
+  `field: ANY("value")`, and only the one integer field (`year_published`)
+  uses `=`. Also confirmed live: `SearchService.search()` does not return
+  `Document.content` inline in this project even with
+  `content_config=CONTENT_REQUIRED` — only `ListDocuments`/`GetDocument` do
+  — so `search_filtered()` always falls back to a per-chunk `GetDocument`
+  call, making the filtered arm's retrieval cost `1 + top_k` round trips,
+  not 1 (real latency, not a bug).
+- **`llm_query.py`** calls `google.genai` directly, not `ingestion/llm/`'s
+  `LLMClient` (that's JSON-only, no seed/thinking/top_p knobs), with no
+  retry/backoff — a retry would corrupt the latency measurement.
+- **`param_sweep.py`** runs `run_comparison()` once per row of a CSV or an
+  in-memory DataFrame (`run_sweep_from_csv()` / `run_sweep()`); any
+  argument column absent or blank falls back to `compare_latency.py`'s own
+  default. Output is long-format (one row per input row × arm run), inputs
+  echoed back under `input_*`. See `rag_check/examples/` for a CSV and an
+  `itertools.product`-built DataFrame sweep.
 
 ## Gotchas
 
