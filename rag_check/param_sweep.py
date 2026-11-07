@@ -254,7 +254,7 @@ def run_sweep(
         for record in records:
             output_rows.append(_flatten(row_id, row, record))
 
-    result_df = pd.DataFrame(output_rows)
+    result_df = pd.DataFrame(output_rows).drop(columns=["chunk_ids"]) # remove chunk_ids
     if out_csv is not None:
         result_df.to_csv(out_csv, index=False)
         logger.info("Wrote %s (%d rows)", out_csv, len(result_df))
@@ -286,9 +286,9 @@ def main() -> None:
 
     if not args.input_csv.exists():
         raise SystemExit(f"Input CSV not found: {args.input_csv}")
-
+    # removing chunk_ids, as full corpus search returns too many tags
     result_df = run_sweep_from_csv(args.input_csv, out_csv=args.out, verbose=args.verbose)
-    result_df.drop(columns="chunk_ids") # remove chunk_ids
+
     print(f"\nRan {len(result_df)} result row(s) from {args.input_csv} -> {args.out}")
     if not result_df.empty:
         print(result_df[["arm", "num_chunks", "retrieval_latency_seconds",
