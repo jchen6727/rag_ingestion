@@ -135,30 +135,44 @@ def _serving_config() -> str:
     )
 
 
-def _decode_text(doc_dict: dict) -> str:
+def _decode_text(doc_dict: dict, warn_if_missing: bool = True) -> str:
     """Decode a Document's base64 `content.rawBytes` to plain text.
 
-    Returns an empty string (logged at WARNING) if the document has no inline
-    content — e.g. a CONTENT_REQUIRED-less DataStore, or a document imported
-    before content storage was enabled.
+    Args:
+        warn_if_missing: Set False when the caller has a fallback it is
+            about to try (search_filtered's get_document retry) — a missing
+            content field on a SearchService result is expected/routine
+            here (confirmed empirically: SearchService does not return
+            inline content in this project, only ListDocuments/GetDocument
+            do), so warning at this point would be a false alarm logged
+            right before the fallback silently recovers the same chunk.
+
+    Returns:
+        "" if the document has no inline content or it fails to decode.
     """
     content = doc_dict.get("content") or {}
     raw = content.get("rawBytes") or content.get("raw_bytes")
     if not raw:
-        logger.warning("Document %s has no inline content; skipping.", doc_dict.get("id"))
+        if warn_if_missing:
+            logger.warning(
+                "Document %s has no content (checked both the inline search "
+                "result and the GetDocument fallback) — dropping from context.",
+                doc_dict.get("id"),
+            )
         return ""
     try:
         return base64.b64decode(raw).decode("utf-8", errors="replace")
     except Exception:
-        logger.warning("Document %s content could not be decoded.", doc_dict.get("id"))
+        if warn_if_missing:
+            logger.warning("Document %s content could not be decoded.", doc_dict.get("id"))
         return ""
 
 
-def _doc_to_chunk(doc_dict: dict) -> RetrievedChunk:
+def _doc_to_chunk(doc_dict: dict, warn_if_missing: bool = True) -> RetrievedChunk:
     struct = doc_dict.get("structData") or doc_dict.get("struct_data") or {}
     return RetrievedChunk(
         chunk_id=str(doc_dict.get("id", "")),
-        text=_decode_text(doc_dict),
+        text=_decode_text(doc_dict, warn_if_missing=warn_if_missing),
         struct_data=struct,
     )
 
@@ -202,19 +216,22 @@ def search_filtered(
     )
     response = client.search(request=request, timeout=_RPC_TIMEOUT)
 
-    # Search results carry the Document proto inline (the DataStore was
-    # provisioned with content_config=CONTENT_REQUIRED — see
-    # scripts/setup_vertex_search.py::create_datastore), so this is usually
-    # one Discovery Engine call, not two. If a given result comes back
-    # without inline content anyway (API behavior here isn't guaranteed
-    # across Discovery Engine versions), fall back to a per-document
-    # DocumentService.get_document() call rather than silently dropping the
-    # chunk from the context.
+    # SearchService.search() results do NOT carry the Document's `content`
+    # field inline in this project (confirmed empirically against a live
+    # DataStore — only ListDocuments/GetDocument return it, even though the
+    # DataStore is provisioned with content_config=CONTENT_REQUIRED; see
+    # scripts/setup_vertex_search.py::create_datastore). So every hit here
+    # routinely needs a follow-up DocumentService.get_document() call to get
+    # its text — this is the normal path, not a rare fallback, and it means
+    # retrieval for this arm costs 1 + top_k Discovery Engine round trips,
+    # not 1 (see rag_check/README.md). warn_if_missing=False on the first
+    # decode attempt below so the expected "no inline content yet" case
+    # doesn't log a false-alarm warning before the get_document call runs.
     doc_client: discoveryengine.DocumentServiceClient | None = None
     chunks: list[RetrievedChunk] = []
     for result in response.results:
         doc_dict = discoveryengine.Document.to_dict(result.document)
-        chunk = _doc_to_chunk(doc_dict)
+        chunk = _doc_to_chunk(doc_dict, warn_if_missing=False)
         if not chunk.text and chunk.chunk_id:
             if doc_client is None:
                 doc_client = discoveryengine.DocumentServiceClient(
