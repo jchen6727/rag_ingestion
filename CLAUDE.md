@@ -186,6 +186,10 @@ A narrow measurement harness that reads from a DataStore already provisioned
 (`scripts/setup_vertex_search.py`) and populated (`scripts/batch_ingest.py`);
 it does not write to the DataStore and does not import from `ingestion/`.
 Full usage, column reference, and worked examples in `rag_check/README.md`.
+`poster/` is built on top of this (a 9-tier prompt-complexity sweep for a
+scientific poster, multiple trials, several real bugs found and fixed) —
+see [`poster/summary.md`](poster/summary.md) for that narrative and current
+priorities.
 
 ```bash
 PYTHONPATH=. python rag_check/compare_latency.py --prompt "..." --tag session_event_tags=disclosure_SI

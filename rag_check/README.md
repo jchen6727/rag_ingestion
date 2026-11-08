@@ -8,6 +8,14 @@ that *reads from* a Vertex AI Search DataStore already populated by
 `scripts/batch_ingest.py`. It does not write to the DataStore, does not
 import from `ingestion/`, and is not exercised by CI.
 
+**`poster/` is built on top of this** (a 9-tier prompt-complexity sweep +
+figure generation for a specific scientific poster) and is the main
+consumer of `param_sweep.py` today. If you're looking for the narrative of
+what's actually been found running this harness — several real bugs,
+corrected across multiple trials — start at
+[`poster/summary.md`](../poster/summary.md), not here; this file is the
+mechanics reference for `rag_check/` itself.
+
 ## What it measures
 
 One LLM call latency, under two different retrieval strategies, against the
@@ -275,6 +283,30 @@ PYTHONPATH=. python rag_check/examples/dataframe_sweep_example.py
   the bare search result stays silent about missing content for exactly
   this reason; a warning only fires if the `get_document` fallback also
   comes back empty, which would indicate a genuinely missing chunk.)
+- **`--search-query` (or `search_query` in a `param_sweep` row) matters more
+  than it looks — literal double quotes are a Discovery Engine search
+  operator, not punctuation.** Confirmed live while debugging
+  `poster/trials/trial_1.md`: `SearchService` parses a straight or curly
+  `"..."` pair in the query text as an **exact-phrase match**, same
+  convention as Google Search. A query built straight from a natural-
+  language prompt that quotes example text (e.g. `...client states "If a
+  car hit me today, I wouldn't really care"?`) silently returns **zero**
+  results if that exact phrase doesn't appear verbatim anywhere in the
+  corpus — even though the metadata filter alone matches plenty of chunks,
+  and even though a lightly-reworded version of the same query (quotes
+  stripped) returns them fine. This fails silently: no error, just an empty
+  `chunk_ids` list and a context-free prompt, which then correctly (!) makes
+  the model say the context doesn't contain an answer — easy to misread as
+  a model-behavior finding instead of a retrieval bug (exactly what
+  happened in trial_1). `--search-query` defaults to `--prompt` verbatim
+  (`compare_latency.py::run_comparison`), so **any prompt that quotes
+  example text should pass an explicit `--search-query` with the quotes
+  removed** (or build one programmatically — see
+  `poster/sweep.py::_search_query_for()` for a working `str.translate`
+  pattern). `search_filtered()` itself is not changed to strip quotes
+  automatically: exact-phrase search is a legitimate capability a caller
+  might want deliberately, so stripping it silently would be its own
+  surprise in the other direction.
 - **Region routing**: Discovery Engine calls (`search_filtered`,
   `list_all_chunks`) go through `settings.discovery_engine_location` /
   `discovery_engine_endpoint`; the Gemini call (`llm_query.run_query`) uses

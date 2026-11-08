@@ -50,6 +50,26 @@ from rag_check.param_sweep import run_sweep  # noqa: E402
 
 N_ARMS = 2  # filtered + full_corpus, run_comparison()'s default
 
+# Discovery Engine's SearchService parses literal straight/curly double quotes
+# in the query text as an exact-phrase operator (confirmed live — see
+# poster/trials/trial_1.md "Investigation: zero chunks retrieved on the
+# hard-failing tiers"). Several tiers' prompts quote an invented client
+# statement for readability in the LLM-facing prompt (e.g. `states "If a car
+# hit me today, I wouldn't really care"?`) — that invented quote doesn't
+# appear verbatim anywhere in the corpus, so using the raw prompt as the
+# Discovery Engine *search query* silently retrieved zero chunks regardless
+# of how well the tag filter matched. The fix is query-side only: strip quote
+# characters from the text used for ranking, while leaving `prompt` (what the
+# LLM actually sees) untouched.
+_QUOTE_CHARS = str.maketrans("", "", '"“”')
+
+
+def _search_query_for(prompt: str) -> str:
+    """Derive the Discovery Engine search query from an LLM prompt, stripped
+    of quote characters that Discovery Engine treats as an exact-phrase
+    operator (see module-level comment above)."""
+    return prompt.translate(_QUOTE_CHARS)
+
 
 def build_sweep_df() -> pd.DataFrame:
     """One row per (tier x repeat); `rag_check.param_sweep` runs both arms
@@ -59,6 +79,7 @@ def build_sweep_df() -> pd.DataFrame:
         for repeat in range(N_REPEATS):
             rows.append({
                 "prompt": tier["prompt"],
+                "search_query": _search_query_for(tier["prompt"]),
                 "tags": TAG_FILTER,
                 "top_k": TOP_K,
                 "model": MODEL,

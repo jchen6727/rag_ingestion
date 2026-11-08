@@ -13,6 +13,56 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Added
+- **`poster/` — 9-tier prompt-complexity sweep + figure for a scientific
+  poster** (2026-11-07): built on `rag_check/param_sweep.py` to answer
+  whether metadata-filtered RAG holds up better than whole-corpus RAG as
+  prompt complexity escalates, on a single clinical topic
+  (`session_event_tags=disclosure_SI`). **Start at
+  `poster/summary.md`** — the narrative entry point, with ranked priorities
+  and bootstrapping instructions for picking this up cold; `poster/README.md`
+  is the mechanics/column reference.
+  - Four trials, each correcting a specific, named mistake in the one
+    before it rather than silently replacing it — all documented, with
+    frozen code+data+figure snapshots, under `poster/trials/`:
+    - **trial_0**: first live run surfaced a paradox *opposite* the one
+      motivating the poster (`filtered`, not `full_corpus`, was the
+      fast-but-unreliable arm) — root-caused to schema fields the corpus
+      couldn't support (`RISK_LEVEL`, `CONFIDENCE`, ...) and prompt-mandated
+      minimum item counts forcing fabrication-or-refusal.
+    - **trial_1**: redesigned schema + raised `top_k`, which in turn exposed
+      two more bugs found while investigating the new data: a quality-
+      scoring false positive (valid JSON honestly reporting an empty finding
+      was mis-flagged as a hard failure), and a retrieval bug — Discovery
+      Engine parses literal `"..."` quote marks in a search query as an
+      exact-phrase operator, so prompts quoting invented example text
+      silently retrieved **zero chunks** on 6 of 9 tiers. Both fixed
+      (`poster/quality.py`, `poster/sweep.py`); corrected rerun archived as
+      `trial_1_rerun/`. A related confound (two "narrative distractor"
+      tiers retrieving fewer chunks than the rest, from their own off-topic
+      content diluting the search query) was found and documented, not
+      fixed.
+    - **trial_2**: `top_k` lowered 20→5 to match the actual target
+      deployment (a therapist-assistant harness needing concise, predictable
+      output, not exhaustive corpus narration) — chosen on that basis before
+      checking which arm it would favor, with the `top_k=20` run preserved
+      unmodified as an exploratory baseline. Cleanest result of the four
+      trials, and the `top_k` reduction incidentally resolved trial_1's
+      narrative-distractor confound as a side effect.
+  - `rag_check/retrieval.py` also gained two real fixes discovered while
+    building this: Discovery Engine's filter grammar needs
+    `field: ANY("value")` for **every** text-indexed field (scalar or
+    array), not `=` for scalars as originally assumed (confirmed live:
+    `directionality = "x"` errors; only the one integer field,
+    `year_published`, uses `=`); and `SearchService.search()` doesn't return
+    chunk content inline in this project even with
+    `content_config=CONTENT_REQUIRED`, so `search_filtered()` now falls back
+    to a per-chunk `GetDocument` call rather than silently dropping chunks.
+  - **No structural evidence for or against the original hallucination-
+    paradox hypothesis has appeared in any trial after the bugs were
+    fixed** — flagged as the top open priority in `poster/summary.md`:
+    nothing in this pipeline verifies response content is actually grounded
+    in retrieved passages versus the model's prior knowledge, only that it
+    parses correctly.
 - **`rag_check/` — RAG latency comparison + parameter sweep harness**
   (2026-11-06): a separate, narrow measurement tool, explicitly **not** part
   of this package's ingestion/tagging/visualization scope (see "What this
