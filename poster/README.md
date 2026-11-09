@@ -156,34 +156,33 @@ pass/fail against a minimum, which is what trial_0 got wrong.
 
 ## The figure (`poster/plot_results.py`)
 
-Three panels, same x-axis (complexity tier 1-9), stacked — not a dual-axis
-chart (three different scales; see the dataviz skill's anti-patterns on why
-dual axes invent correlations that aren't in the data):
+**Single panel** (revised after supervisor review of an earlier 3-panel version —
+see `poster/trials/trial_2.md`'s figure-revision addendum for the full history):
 
-- **Top: mean total latency**, filtered vs. full_corpus, error bars = SEM
-  across the 5 repeats.
-- **Middle: hard failure rate** — `declined_insufficient_context` /
-  `malformed_json` / `missing_keys` / `exceeded_char_budget` — same two
-  series, same x-axis.
-- **Bottom: structural variability** — mean coefficient of variation (CV%)
-  of `list_fields` item counts across the 5 repeats, for responses that
-  otherwise parsed fine. This is the inaccuracy proxy that replaced
-  trial_0's strict minimum-item-count check: a field whose item count swings
-  wildly run to run, even when every individual response is well-formed,
-  suggests the model is improvising structure rather than reporting
-  something stable it actually found in the retrieved guidance.
+- **X-axis is plain prompt number** — "Prompt 1".."Prompt 9" — not a complexity
+  tier. These are 9 distinct prompts on one topic; the chart makes no claim about
+  which one is "harder." (`poster/prompts.py`'s internal `tier`/`label` fields are
+  unchanged and still document what each prompt actually asks — that's a
+  maintainer-facing identifier, not something surfaced to the viewer as a ranking.)
+- **Mean total latency** per prompt per arm, drawn as a bar with an SEM error bar,
+  **plus every individual repeat plotted as a jittered point** on top of its bar —
+  supervisors wanted the actual run-to-run spread visible, not just the aggregate.
+- **A run that hard-failed** (`declined_insufficient_context` / `malformed_json` /
+  `missing_keys` / `exceeded_char_budget`) is drawn as a distinct point — critical-red
+  "x" marker (the dataviz skill's reserved status color, never used for a plain
+  series) instead of its arm's color/circle — with its own legend entry ("Failed run
+  (hard failure)"). This replaces what used to be a separate failure-rate panel: the
+  same information, folded into the latency plot as a per-point flag instead of a
+  second chart.
+- **No structural-variability panel.** Removed, not just hidden: supervisors noted
+  interrater disagreement on what counts as "correct" output structure, so scoring
+  consistency against an assumed-correct shape isn't defensible yet.
+  `_aggregate_variability()` stays in `plot_results.py`, unused, for if/when that
+  metric is revisited with an agreed ground truth.
 
-Read the top two together first: wherever one arm's latency bar dips
-*below* the other's while its failure-rate bar spikes at the same tier,
-that's the latency/reliability paradox this poster reports — it only "won"
-on speed because it gave up on the output, not because retrieval+generation
-was actually more efficient. The script auto-annotates the single clearest
-instance of this pattern with a direct-label arrow, in whichever direction
-the live data actually shows it (deliberately not hardcoded to either arm —
-see `_find_paradox_annotation()`). The bottom panel is a second, independent
-lens: an arm can have a *low* failure rate and *still* show high
-variability, which is itself worth noting on the poster as "technically
-valid, but inconsistent."
+The latency finding itself — `filtered` faster than `full_corpus` on every prompt in
+trial_2 — was explicitly called defensible as-is; this revision only changed how it's
+presented, not the underlying data (no rerun).
 
 Colors are the dataviz skill's validated default palette, categorical slots
 1-2 (blue = filtered, green = full_corpus), fixed order throughout, checked
@@ -210,12 +209,13 @@ Output is `poster/figure.png` (2x-scale PNG for print) plus
   pipeline. No structural signal either way has appeared in any trial after
   the bugs were fixed — treat it as a fully open question, not a settled
   finding in either direction.
-- **Coefficient of variation is unreliable near a zero mean.** T6's
-  variability bar in trial_2 spikes to ~122% purely because its list
-  field's typical count is 0-1 items — a metric artifact, not a real
-  consistency problem (see trial_2.md). Worth switching to an absolute-range
-  measure for low-count list fields before the variability panel goes on
-  the poster without this caveat attached.
+- **Structural variability is not currently scored or shown.** Removed
+  after supervisor review found interrater disagreement on what counts as
+  "correct" output structure — a CV-based consistency metric isn't
+  defensible without an agreed ground truth (and the metric itself has a
+  separate, still-unresolved flaw: it's unreliable near a zero mean — see
+  trial_2.md's original finding). `poster/plot_results.py::_aggregate_variability()`
+  is kept in the code, unused, for if/when this is revisited.
 - **T9's character budget (700 chars) is tight.** `full_corpus` fails it
   20% of the time at `top_k=5` (worse at `top_k=20` — see trial_1_rerun);
   `filtered` never has in any trial so far. Not yet stress-tested at other

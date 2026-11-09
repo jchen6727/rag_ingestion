@@ -3,7 +3,9 @@
 One-page entry point for this body of work. Read this first; it links out to
 everything else. Written for a human skimming for what matters, and for
 another agent picking this up cold — see "Bootstrapping for another agent"
-at the bottom.
+at the bottom. For the fuller research agenda behind the priorities below —
+what each finding implies for evaluating LLM/RAG design more generally, not
+just this poster — see [`research_todo.md`](research_todo.md).
 
 ## Priorities — what to do next, ranked by impact
 
@@ -18,13 +20,18 @@ at the bottom.
    response + the actual retrieved chunks to a judge, ask "is every claim
    traceable to a chunk") against `trial_2`'s data, before any claim about
    accuracy goes on the poster. Nothing currently measures this.
-2. **Fix the CV-near-zero-mean metric artifact before the variability panel
-   is poster-ready.** `poster/quality.py` / `poster/plot_results.py`'s
-   coefficient-of-variation metric blows up arithmetically when a list
-   field's mean count is near zero (trial_2's T6: counts `[0,0,1,1,0]` →
-   122% CV, not a real consistency problem — see `trials/trial_2.md`).
-   Switch to an absolute-range or count-of-distinct-values measure for
-   low-count fields, or clip/flag CV when mean < some threshold.
+2. **Structural-variability scoring is on hold, not fixed.** The
+   coefficient-of-variation panel was removed from the figure after
+   supervisor review found interrater disagreement on what counts as
+   "correct" output structure in the first place — scoring consistency
+   against an assumed-correct shape isn't defensible until that's resolved.
+   The metric itself also has a separate, still-real flaw worth fixing
+   before it's revisited: it blows up arithmetically when a list field's
+   mean count is near zero (trial_2's original T6 finding: counts
+   `[0,0,1,1,0]` → 122% CV, not a real consistency problem). Both need
+   addressing — agreed ground truth first, then the metric — before
+   structural variability goes back on a poster. `_aggregate_variability()`
+   is kept in `poster/plot_results.py`, unused, for when that happens.
 3. **Decide what goes on the poster: `top_k=5` (production-configured) or
    `top_k=20` (exploratory), and say why, explicitly.** Both are real,
    honestly-obtained results (`trials/trial_2/` and `trials/trial_1_rerun/`
@@ -60,8 +67,10 @@ Two layers, built in this order:
   scientific-poster figure: a 9-tier escalating-complexity prompt ladder on
   a single clinical topic (suicidal-ideation disclosure), run through
   `rag_check.param_sweep`, scored for structural JSON quality
-  (`poster/quality.py`), and rendered as a three-panel chart (latency /
-  hard-failure rate / structural variability).
+  (`poster/quality.py`), and rendered as a single-panel chart: mean latency
+  per prompt with individual repeat points shown and hard-failed runs
+  flagged directly on the plot (see "Figure design" below — this started
+  as three panels and was simplified after supervisor review).
 
 ## What was actually found — in order, because each one corrected the last
 
@@ -78,6 +87,25 @@ earlier ones rather than silently replacing them:
 **No trial has found structural evidence either way for the original
 hallucination-paradox hypothesis.** That's not a negative result — it's an
 untested one (see Priority 1).
+
+### Figure design — simplified after supervisor review (same trial_2 data)
+
+The figure went through one more revision on top of trial_2's data (no rerun,
+documented as an addendum in `trial_2.md`, not a new trial): originally three
+stacked panels (latency / hard-failure rate / structural variability), now one.
+Supervisors asked for three specific changes, all applied:
+
+1. **No complexity framing.** X-axis is plain "Prompt 1".."Prompt 9", not a
+   labeled complexity tier — these are 9 distinct prompts, not a validated
+   difficulty ladder.
+2. **Discrete values, not just the mean.** Every repeat is now an individual
+   jittered point on top of its bar; SEM error bars are kept.
+3. **Variability panel removed** (interrater disagreement on "correct" structure
+   — see Priority 2); **failure-rate panel folded into the latency plot** as a
+   per-point flag (critical-red "x" + legend entry) instead of a separate chart.
+
+The underlying finding (`filtered` faster on every prompt) was called defensible
+as-is — this was a presentation change, not a data change.
 
 ## Where the numbers actually are
 
@@ -142,14 +170,15 @@ If you're picking this up with no prior context, in order:
 ```
 poster/
   summary.md          <- you are here
+  research_todo.md     findings + future directions for evaluating LLM/RAG design
   README.md            pipeline mechanics, column reference, current limitations
   prompts.py           the 9-tier ladder + sweep constants (single source of truth)
   quality.py           per-response structural scoring
   sweep.py              builds the sweep DataFrame, runs rag_check.param_sweep
-  plot_results.py      scores + renders the 3-panel figure
+  plot_results.py      scores + renders the single-panel figure (latency + discrete runs + failure flags)
   sweep_example.csv     original 3 hand-written seed cases this ladder expands on
   sweep_results.csv     latest run's raw data (currently = trial_2)
-  figure.png/.html      latest run's figure (currently = trial_2)
+  figure.png/.html      latest run's figure (currently = trial_2, revised presentation)
   trials/
     trial_0.md, trial_1.md, trial_2.md   <- READ IN ORDER
     trial_0/, trial_1/, trial_1_rerun/, trial_2/   frozen code+data+figure per trial

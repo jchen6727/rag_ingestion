@@ -48,6 +48,20 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
       unmodified as an exploratory baseline. Cleanest result of the four
       trials, and the `top_k` reduction incidentally resolved trial_1's
       narrative-distractor confound as a side effect.
+      - **Figure revised after supervisor review** (same trial_2 data, no
+        rerun): `poster/plot_results.py` went from three stacked panels to
+        one. X-axis changed from a labeled "complexity tier" to a plain
+        prompt number (supervisors didn't want these 9 prompts framed as a
+        validated difficulty ladder); every individual repeat is now
+        plotted as a jittered point on top of its bar, not just the mean
+        (SEM error bars kept); the structural-variability panel was removed
+        (interrater disagreement on what counts as "correct" output
+        structure, surfaced during review — `_aggregate_variability()`
+        stays in the code, unused, for later); the hard-failure-rate panel
+        was folded into the latency plot as a per-point flag (a reserved
+        status-red "x" marker + one legend entry) instead of a separate
+        chart. The underlying latency finding was unchanged and called
+        defensible as-is.
   - `rag_check/retrieval.py` also gained two real fixes discovered while
     building this: Discovery Engine's filter grammar needs
     `field: ANY("value")` for **every** text-indexed field (scalar or

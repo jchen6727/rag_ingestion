@@ -2,46 +2,41 @@
 """
 Render the poster figure from poster/sweep.py's result CSV.
 
-Three stacked small-multiple panels sharing one categorical x-axis
-(complexity tier 1-9, ordered) — deliberately NOT a dual-axis chart (the
-three measures are different scales; see dataviz anti-patterns on why two
-y-scales on one plot invent correlations that aren't in the data):
+Single-panel design (revised after supervisor review of the earlier
+3-panel version — see poster/trials/trial_2.md's figure-revision addendum):
 
-  Panel A (top):     mean total latency per tier, filtered vs. full_corpus,
-                      error bars = SEM across the 5 repeats per tier.
-  Panel B (middle):   % of repeats with a hard structural failure
-                      (poster/quality.py: declined to answer, malformed
-                      JSON, a missing required key, or an explicit
-                      character budget blown) — same two series, same
-                      x-axis, aligned under panel A.
-  Panel C (bottom):   structural variability across the 5 repeats — mean
-                      coefficient of variation (CV%) of list-field item
-                      counts for responses that otherwise parsed fine. High
-                      CV, even with zero hard failures, means the model is
-                      improvising how much structure to produce rather than
-                      reporting something stable it actually found — the
-                      softer inaccuracy proxy poster/trials/trial_0.md
-                      adopted after trial_0's strict minimum-item-count
-                      check turned out to be confounded with the thing it
-                      was trying to measure (see that doc, and
-                      poster/quality.py's docstring).
+  - X-axis is plain prompt number ("Prompt 1" .. "Prompt 9"), not a
+    "complexity tier" — supervisors specifically asked not to frame these
+    9 prompts as more-or-less complex; they're 9 distinct prompts on the
+    same topic, numbered, nothing more. (The underlying code still orders
+    them 1-9 and `poster/prompts.py` still documents what each one asks —
+    that's an implementation detail for maintainers, not something this
+    chart asserts to the viewer.)
+  - Each arm's mean total latency is still a bar (± SEM error bar), but
+    the 5 individual repeat values are now also plotted as discrete points
+    jittered around each bar — supervisors wanted to see the actual runs,
+    not just the aggregate.
+  - A run that hard-failed (poster/quality.py: declined to answer,
+    malformed JSON, a missing required key, or an explicit character
+    budget blown) is drawn in a reserved status color (critical red) with
+    an "x" marker instead of its arm's color/circle — not a separate
+    failure-rate panel anymore, just a per-point flag on the same latency
+    plot, with one extra legend entry.
+  - The structural-variability panel (coefficient-of-variation of list
+    item counts) is REMOVED for now, not just hidden — supervisors noted
+    interrater disagreement on what counts as "correct" structure, so a
+    metric that scores structural consistency against an assumed-correct
+    shape isn't defensible yet. `_aggregate_variability()` is kept in the
+    code (unused) in case that metric is revisited later with an agreed
+    ground truth; it is deliberately not wired into build_figure().
 
-Panels A+B together are the headline: wherever one arm's bar in panel A
-dips *below* the other's (it looks faster) while panel B shows that SAME
-arm's failure rate spiking at the same tier, that's the paradox this poster
-reports — it only "wins" on latency because it gave up on the output (or
-declined to answer at all), not because retrieval+generation was actually
-more efficient. `_find_paradox_annotation()` checks both directions and
-labels whichever arm the live data actually shows this for — don't assume
-it's full_corpus: trial_0 found the filtered arm was the one trading
-reliability for speed (a narrow top_k + schema fields the corpus couldn't
-support made it decline, per the "don't guess" system preamble, far more
-often than full_corpus, which has the whole corpus to search for something
-relevant — see poster/trials/trial_0.md for the full trial_0 writeup).
-
-Colors follow the dataviz skill's validated default palette, categorical
-slots 1-2 (blue=filtered, green=full_corpus) — validated for this pair:
+Colors follow the dataviz skill's validated default palette: categorical
+slots 1-2 for the two arms (blue=filtered, green=full_corpus), validated
+for this pair:
     node <dataviz-skill>/scripts/validate_palette.js "#2a78d6,#008300" --mode light
+and the skill's fixed status palette for the failed-run marker (critical,
+reserved — never reused for a plain series, always paired with a legend
+label here, per the skill's status-color rule).
 
 Usage:
     PYTHONPATH=. python poster/plot_results.py
@@ -53,14 +48,12 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
-from plotly.subplots import make_subplots  # noqa: E402
 
 from poster.prompts import TIERS_BY_NUMBER  # noqa: E402
 from poster.quality import FAILURE_FLAGS, evaluate_quality  # noqa: E402
@@ -71,12 +64,22 @@ _COLOR_FULL_CORPUS = "#008300"
 _ARM_COLORS = {"filtered": _COLOR_FILTERED, "full_corpus": _COLOR_FULL_CORPUS}
 _ARM_ORDER = ["filtered", "full_corpus"]
 _ARM_LABELS = {"filtered": "Filtered (tagged guidance)", "full_corpus": "Whole corpus"}
+_ARM_X_OFFSET = {"filtered": -0.18, "full_corpus": 0.18}
+
+# Fixed status palette (dataviz skill) — reserved, never themed, always
+# paired with a legend label. Used only for the failed-run marker.
+_COLOR_CRITICAL = "#d03b3b"
 
 _TEXT_PRIMARY = "#0b0b0b"
 _TEXT_SECONDARY = "#52514e"
 _TEXT_MUTED = "#898781"
 _GRIDLINE = "#e1e0d9"
 _SURFACE = "#fcfcfb"
+
+# Small deterministic within-group spread so 5 repeats at the same bar
+# don't sit exactly on top of each other. Centered on 0, well inside the
+# 0.36-wide bar.
+_JITTER_BY_REPEAT = {0: -0.09, 1: -0.045, 2: 0.0, 3: 0.045, 4: 0.09}
 
 
 def _score_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -102,33 +105,27 @@ def _score_rows(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["quality_flag"] = flags
     df["list_item_counts"] = item_counts
+    df["is_failure"] = df["quality_flag"].isin(FAILURE_FLAGS)
     return df
 
 
-def _aggregate_latency_and_failures(df: pd.DataFrame) -> pd.DataFrame:
-    """One row per (tier, arm): mean/SEM latency + hard-failure rate."""
+def _aggregate_latency(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per (tier, arm): mean/SEM latency, for the bars."""
     df = df[df["arm"].isin(_ARM_ORDER)].copy()
-    df["is_failure"] = df["quality_flag"].isin(FAILURE_FLAGS)
-
-    grouped = df.groupby(["input_complexity_tier", "input_complexity_label", "arm"])
+    grouped = df.groupby(["input_complexity_tier", "arm"])
     agg = grouped["total_latency_seconds"].agg(["mean", "sem", "count"]).reset_index()
-    fail_rate = grouped["is_failure"].mean().reset_index(name="failure_rate")
-    agg = agg.merge(fail_rate, on=["input_complexity_tier", "input_complexity_label", "arm"])
-    agg = agg.sort_values(["input_complexity_tier", "arm"])
     agg["sem"] = agg["sem"].fillna(0.0)
-    return agg
+    return agg.sort_values(["input_complexity_tier", "arm"])
 
 
 def _aggregate_variability(df: pd.DataFrame) -> pd.DataFrame:
     """One row per (tier, arm): mean coefficient of variation (CV%) of
-    list-field item counts across the 5 repeats, averaged over every
-    list_field that tier defines. NaN where fewer than 2 non-null
-    observations exist for every field (can't compute a variance) — the
-    figure just leaves that bar empty rather than fabricating a 0."""
+    list-field item counts across the 5 repeats. NOT currently used by
+    build_figure() — see module docstring ("structural-variability panel
+    removed for now"). Kept here, unused, in case this metric is revisited
+    once there's an agreed ground truth for "correct" structure."""
     records = []
-    for (tier, label, arm), group in df[df["arm"].isin(_ARM_ORDER)].groupby(
-        ["input_complexity_tier", "input_complexity_label", "arm"]
-    ):
+    for (tier, arm), group in df[df["arm"].isin(_ARM_ORDER)].groupby(["input_complexity_tier", "arm"]):
         tier_def = TIERS_BY_NUMBER.get(int(tier), {})
         list_fields = tier_def.get("list_fields") or []
         field_cvs = []
@@ -145,159 +142,94 @@ def _aggregate_variability(df: pd.DataFrame) -> pd.DataFrame:
                 field_cvs.append(float(np.std(counts) / mean_count * 100.0))
         records.append({
             "input_complexity_tier": tier,
-            "input_complexity_label": label,
             "arm": arm,
             "mean_cv_pct": float(np.mean(field_cvs)) if field_cvs else np.nan,
         })
     return pd.DataFrame(records).sort_values(["input_complexity_tier", "arm"])
 
 
-def _find_paradox_annotation(agg: pd.DataFrame, tier_order: list, x_labels: list) -> Optional[dict]:
-    """Pick the single (tier, arm) pair that most clearly shows the paradox —
-    one arm *faster* at that tier while *also* failing structurally more
-    often than the other — and return one arrow annotation pointing at its
-    latency bar, or None if no tier in this run shows the pattern in either
-    direction. Checked both ways deliberately: which arm ends up faster-but-
-    less-reliable is an empirical question, not an assumption (trial_0 found
-    it was `filtered`, the opposite of the originally anticipated direction
-    — see poster/trials/trial_0.md)."""
-    pivot = agg.pivot(index="input_complexity_tier", columns="arm", values=["mean", "failure_rate"])
-    best = None  # (score, tier, faster_arm, faster_mean, faster_fail)
-    for tier in tier_order:
-        try:
-            means = {arm: pivot.loc[tier, ("mean", arm)] for arm in _ARM_ORDER}
-            fails = {arm: pivot.loc[tier, ("failure_rate", arm)] for arm in _ARM_ORDER}
-        except KeyError:
-            continue
-        for faster, slower in (("filtered", "full_corpus"), ("full_corpus", "filtered")):
-            latency_gap = means[slower] - means[faster]  # faster arm being quicker -> positive
-            failure_gap = fails[faster] - fails[slower]  # faster arm failing more -> positive
-            if latency_gap > 0 and failure_gap > 0:
-                score = latency_gap * failure_gap
-                if best is None or score > best[0]:
-                    best = (score, tier, faster, means[faster], fails[faster])
-
-    if best is None:
-        return None
-    _, tier, faster_arm, faster_mean, faster_fail = best
-    idx = tier_order.index(tier)
-    return dict(
-        text=f"{_ARM_LABELS[faster_arm]}: faster, but {faster_fail * 100:.0f}% failed",
-        x=x_labels[idx], y=faster_mean,
-        xref="x", yref="y",
-        ax=40, ay=-50, showarrow=True, arrowcolor=_TEXT_SECONDARY, arrowwidth=1.5, arrowhead=2,
-        font=dict(size=12, color=_TEXT_PRIMARY),
-        bgcolor=_SURFACE, bordercolor=_TEXT_SECONDARY, borderwidth=1, borderpad=4,
-    )
-
-
-def build_figure(agg: pd.DataFrame, variability: pd.DataFrame) -> go.Figure:
+def build_figure(df: pd.DataFrame, agg: pd.DataFrame) -> go.Figure:
     tier_order = sorted(agg["input_complexity_tier"].unique())
-    x_labels = [f"T{t}" for t in tier_order]
+    x_pos_by_tier = {t: i for i, t in enumerate(tier_order)}
+    tick_labels = [f"Prompt {t}" for t in tier_order]
 
-    fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.07,
-        row_heights=[0.44, 0.26, 0.30],
-        subplot_titles=(
-            "Mean response latency by prompt complexity (± SEM, n=5 repeats)",
-            "Hard failure rate (declined to answer / malformed JSON / missing key / over character budget)",
-            "Structural variability across repeats (mean CV% of list item counts — lower is more consistent)",
-        ),
-    )
+    fig = go.Figure()
 
     for arm in _ARM_ORDER:
         sub = agg[agg["arm"] == arm].set_index("input_complexity_tier").reindex(tier_order)
-        var_sub = variability[variability["arm"] == arm].set_index("input_complexity_tier").reindex(tier_order)
-        fig.add_trace(
-            go.Bar(
-                x=x_labels, y=sub["mean"],
-                error_y=dict(type="data", array=sub["sem"], color=_TEXT_SECONDARY, thickness=1.5, width=3),
-                name=_ARM_LABELS[arm], marker=dict(color=_ARM_COLORS[arm]),
-                width=0.36, legendgroup=arm, showlegend=True,
-            ),
-            row=1, col=1,
-        )
-        fig.add_trace(
-            go.Bar(
-                x=x_labels, y=sub["failure_rate"] * 100.0,
-                name=_ARM_LABELS[arm], marker=dict(color=_ARM_COLORS[arm]),
-                width=0.36, legendgroup=arm, showlegend=False,
-            ),
-            row=2, col=1,
-        )
-        fig.add_trace(
-            go.Bar(
-                x=x_labels, y=var_sub["mean_cv_pct"],
-                name=_ARM_LABELS[arm], marker=dict(color=_ARM_COLORS[arm]),
-                width=0.36, legendgroup=arm, showlegend=False,
-            ),
-            row=3, col=1,
-        )
+        bar_x = [x_pos_by_tier[t] + _ARM_X_OFFSET[arm] for t in tier_order]
+        fig.add_trace(go.Bar(
+            x=bar_x, y=sub["mean"],
+            error_y=dict(type="data", array=sub["sem"], color=_TEXT_SECONDARY, thickness=1.5, width=3),
+            name=_ARM_LABELS[arm], marker=dict(color=_ARM_COLORS[arm], opacity=0.55),
+            width=0.34, legendgroup=arm, showlegend=True,
+        ))
 
-    tier_captions = [
-        f"T{t}: {TIERS_BY_NUMBER[t]['label']}" for t in tier_order if t in TIERS_BY_NUMBER
-    ]
-    mid = (len(tier_captions) + 1) // 2
-    tier_caption_text = (
-        "  ·  ".join(tier_captions[:mid]) + "<br>" + "  ·  ".join(tier_captions[mid:])
-    )
-
-    # One sparing direct label on the single tier that best tells the paradox
-    # story — not a number on every bar (see dataviz skill: label selectively).
-    # Disabled (uncomment to re-enable): _find_paradox_annotation(agg, tier_order, x_labels)
-    paradox_annotation = None
+    # Discrete per-repeat points, jittered around each bar. Split by
+    # pass/fail so a failed run renders in the reserved status color with
+    # its own legend entry, instead of a separate failure-rate panel.
+    first_failed_point_plotted = False
+    for arm in _ARM_ORDER:
+        arm_rows = df[df["arm"] == arm]
+        for failed in (False, True):
+            subset = arm_rows[arm_rows["is_failure"] == failed]
+            if subset.empty:
+                continue
+            xs, ys = [], []
+            for _, row in subset.iterrows():
+                tier = int(row["input_complexity_tier"])
+                repeat = int(row.get("input_repeat", 0))
+                jitter = _JITTER_BY_REPEAT.get(repeat, 0.0)
+                xs.append(x_pos_by_tier[tier] + _ARM_X_OFFSET[arm] + jitter)
+                ys.append(row["total_latency_seconds"])
+            if failed:
+                show_legend = not first_failed_point_plotted
+                first_failed_point_plotted = True
+                marker = dict(color=_COLOR_CRITICAL, size=10, symbol="x", line=dict(width=1, color=_SURFACE))
+                name = "Failed run (hard failure)"
+            else:
+                show_legend = False
+                marker = dict(
+                    color=_ARM_COLORS[arm], size=7, symbol="circle",
+                    line=dict(width=1, color=_SURFACE),
+                )
+                name = _ARM_LABELS[arm]
+            fig.add_trace(go.Scatter(
+                x=xs, y=ys, mode="markers", marker=marker,
+                name=name, legendgroup="failed" if failed else arm,
+                showlegend=show_legend,
+            ))
 
     fig.update_layout(
-        barmode="group",
-        bargap=0.25,
-        bargroupgap=0.08,
+        barmode="overlay",
         plot_bgcolor=_SURFACE,
         paper_bgcolor=_SURFACE,
         font=dict(family="system-ui, -apple-system, 'Segoe UI', sans-serif", color=_TEXT_PRIMARY, size=15),
-        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="left", x=0, font=dict(size=14)),
-        margin=dict(l=70, r=30, t=90, b=190),
+        title=dict(
+            text="Mean response latency per prompt (± SEM; individual runs shown, n=5 each)",
+            font=dict(size=17, color=_TEXT_PRIMARY),
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=14)),
+        margin=dict(l=70, r=30, t=100, b=70),
         width=1400,
-        height=1260,
-        annotations=list(fig.layout.annotations) + [
-            dict(
-                text=tier_caption_text,
-                xref="paper", yref="paper", x=0, y=-0.13,
-                showarrow=False, align="left",
-                font=dict(size=12, color=_TEXT_SECONDARY),
-            ),
-        ] + ([paradox_annotation] if paradox_annotation else []),
+        height=750,
     )
     fig.update_yaxes(
-        title_text="Seconds", row=1, col=1,
-        gridcolor=_GRIDLINE, zerolinecolor=_GRIDLINE, tickfont=dict(color=_TEXT_MUTED),
-        title_font=dict(color=_TEXT_SECONDARY),
-    )
-    fig.update_yaxes(
-        title_text="% of repeats", row=2, col=1,
-        gridcolor=_GRIDLINE, zerolinecolor=_GRIDLINE, tickfont=dict(color=_TEXT_MUTED),
-        title_font=dict(color=_TEXT_SECONDARY), range=[0, 100],
-    )
-    fig.update_yaxes(
-        title_text="CV %", row=3, col=1,
+        title_text="Seconds",
         gridcolor=_GRIDLINE, zerolinecolor=_GRIDLINE, tickfont=dict(color=_TEXT_MUTED),
         title_font=dict(color=_TEXT_SECONDARY), rangemode="tozero",
     )
-    fig.update_xaxes(gridcolor=_GRIDLINE, tickfont=dict(color=_TEXT_MUTED), row=1, col=1)
-    fig.update_xaxes(gridcolor=_GRIDLINE, tickfont=dict(color=_TEXT_MUTED), row=2, col=1)
     fig.update_xaxes(
-        title_text="Prompt complexity tier (see key below)", gridcolor=_GRIDLINE,
-        tickfont=dict(color=_TEXT_MUTED), title_font=dict(color=_TEXT_SECONDARY), row=3, col=1,
+        title_text="Prompt #",
+        tickvals=list(range(len(tier_order))), ticktext=tick_labels,
+        gridcolor=_GRIDLINE, tickfont=dict(color=_TEXT_MUTED), title_font=dict(color=_TEXT_SECONDARY),
     )
-    for annotation in fig.layout.annotations[:3]:
-        annotation.font = dict(size=15, color=_TEXT_PRIMARY)
     return fig
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Render the filtered-vs-full-corpus latency/quality poster figure."
+        description="Render the filtered-vs-full-corpus latency poster figure."
     )
     parser.add_argument("--csv", type=Path, default=Path(__file__).parent / "sweep_results.csv",
                         help="Result CSV from poster/sweep.py (default: poster/sweep_results.csv).")
@@ -311,10 +243,9 @@ def main() -> None:
 
     df = pd.read_csv(args.csv)
     df = _score_rows(df)
-    agg = _aggregate_latency_and_failures(df)
-    variability = _aggregate_variability(df)
+    agg = _aggregate_latency(df)
 
-    fig = build_figure(agg, variability)
+    fig = build_figure(df, agg)
     fig.write_image(str(args.out), scale=2)
     html_out = args.out.with_suffix(".html")
     fig.write_html(str(html_out), include_plotlyjs="cdn")
@@ -322,14 +253,14 @@ def main() -> None:
     print(f"Wrote {args.out}")
     print(f"Wrote {html_out} (interactive / table-view twin)")
 
-    summary = agg.merge(
-        variability[["input_complexity_tier", "arm", "mean_cv_pct"]],
-        on=["input_complexity_tier", "arm"], how="left",
-    )
-    print("\nPer-tier summary:")
+    fail_rate = df[df["arm"].isin(_ARM_ORDER)].groupby(
+        ["input_complexity_tier", "arm"]
+    )["is_failure"].mean().reset_index(name="failure_rate")
+    summary = agg.merge(fail_rate, on=["input_complexity_tier", "arm"])
+    print("\nPer-prompt summary:")
     print(
-        summary[["input_complexity_label", "arm", "mean", "sem", "failure_rate", "mean_cv_pct", "count"]]
-        .rename(columns={"mean": "mean_latency_s", "sem": "sem_latency_s"})
+        summary[["input_complexity_tier", "arm", "mean", "sem", "failure_rate", "count"]]
+        .rename(columns={"mean": "mean_latency_s", "sem": "sem_latency_s", "input_complexity_tier": "prompt"})
         .to_string(index=False)
     )
 
